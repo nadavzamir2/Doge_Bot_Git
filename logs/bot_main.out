@@ -1,0 +1,21 @@
+2025-08-24 22:24:12 [INFO] Mode: LIVE
+2025-08-24 22:24:12 [INFO] ENV: /Users/yuvalzamir/doge_bot/.env
+2025-08-24 22:24:12 [INFO] Region: com  (class=binance)
+2025-08-24 22:24:12 [INFO] Trade key prefix: cmdqS3…  secret prefix: iSrhMO…
+2025-08-24 22:24:12 [INFO] Pair=DOGE/USDT | Grid=0.130000..0.320000 (step=1.000%) | base_order_usd=5.00 | max_cycle=40.00
+2025-08-24 22:24:16 [INFO] Exchange info: {'amount_precision': 1.0, 'price_precision': 1e-05, 'amount_step': 1.0, 'price_tick': 1e-05, 'min_cost': 1.0}
+2025-08-24 22:24:16 [INFO] Starting base_order_usd = 5.0
+2025-08-24 22:24:17 [WARNING] Not enough free USDT: 4.838862. Need >= 35. Skipping placements.
+2025-08-24 22:24:17 [INFO] Bootstrapped 0 open buys.
+2025-08-24 22:24:17 [ERROR] Fatal error: 'processed_buys'
+Traceback (most recent call last):
+  File "/Users/yuvalzamir/doge_bot/main.py", line 421, in <module>
+    run()
+    ~~~^^
+  File "/Users/yuvalzamir/doge_bot/main.py", line 412, in run
+    handle_fills_and_post_sells(ex, info, PAIR, state)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yuvalzamir/doge_bot/main.py", line 284, in handle_fills_and_post_sells
+    if buy_id in state["processed_buys"]:
+                 ~~~~~^^^^^^^^^^^^^^^^^^
+KeyError: 'processed_buys'

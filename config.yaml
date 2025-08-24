@@ -1,0 +1,25 @@
+ops:
+  paper_trading: false     # true = סימולציה, false = לייב
+  telegram_alerts: false   # שים false כדי שלא יהיו אזהרות טלגרם
+orders:
+  buy_window_usd_cap: 40    # התחל קטן (עסקה אחת בערך)
+  max_exposure_usd: 80   # אופציונלי: תקרת חשיפה כוללת
+grid:
+  lower: 0.13
+  upper: 0.32
+  spacing_pct: 1.0
+  window_active_buy_levels: 16
+  recenter:
+    enable: true
+    edge_threshold_pct: 90
+    dwell_seconds: 600
+    center_drift_pct_of_width: 25
+    cooldown_seconds: 900
+profit_split:
+  trigger_usd: 4
+  bnb_bucket_pct: 50
+  reinvest_bucket_pct: 50
+  min_bnb_buy_usd: 5
+  min_reinvest_usd: 5
+reinvest:
+  order_size_increment_usd: 0.5

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DOGE Grid Bot – Dashboard</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <style>
+    :root { --bg:#0b1020; --panel:#111831; --text:#e9eefc; --muted:#9fb2d9; --accent:#7aa2ff; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial; background: var(--bg); color: var(--text); }
+    header { padding:16px 20px; border-bottom:1px solid #192347; display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+    h1 { font-size:20px; margin:0; font-weight:600; color: var(--text); }
+    .muted { color: var(--muted); font-size:13px; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:12px; padding:14px 16px; }
+    .card { background: var(--panel); border:1px solid #192347; border-radius:14px; padding:14px; box-shadow: 0 4px 12px rgba(0,0,0,.25); }
+    .card h3 { margin:0 0 6px 0; font-size:13px; color: var(--muted); font-weight:600; }
+    .card .val { font-size:22px; font-weight:700; }
+    .row { display:flex; gap:8px; align-items:baseline; }
+    .pill { padding:2px 8px; border-radius:999px; font-size:12px; background:#172042; color:#a9beff; border:1px solid #233164; }
+    .wrap { padding: 0 16px 16px; }
+    #chartWrap { background: var(--panel); border:1px solid #192347; border-radius:14px; padding:12px; }
+    canvas { width:100%; height:420px; }
+    footer { padding:10px 16px 18px; color: var(--muted); font-size:12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>🐶 DOGE Grid Bot – Dashboard</h1>
+      <div class="muted" id="subtitle">טוען...</div>
+    </div>
+    <div class="row">
+      <span class="pill" id="pairPill">—</span>
+      <span class="pill">מִרווח גריד: <b id="spacingPill">—</b>%</span>
+      <span class="pill">Base Order: <b id="basePill">—</b>$</span>
+    </div>
+  </header>
+
+  <section class="grid">
+    <div class="card"><h3>מחיר נוכחי</h3><div class="val" id="price">—</div></div>
+    <div class="card"><h3>USDT פנוי</h3><div class="val" id="usdtFree">—</div></div>
+    <div class="card"><h3>DOGE פנוי</h3><div class="val" id="dogeFree">—</div></div>
+    <div class="card"><h3>BUY פתוחות</h3><div class="val" id="openBuys">—</div></div>
+    <div class="card"><h3>SELL פתוחות</h3><div class="val" id="openSells">—</div></div>
+    <div class="card"><h3>חשיפת BUY $</h3><div class="val" id="exposure">—</div></div>
+    <div class="card"><h3>Reinvest Pool $</h3><div class="val" id="rePool">—</div></div>
+    <div class="card"><h3>BNB Pending $</h3><div class="val" id="bnbPend">—</div></div>
+    <div class="card"><h3>Next BUY Extra $</h3><div class="val" id="nextExtra">—</div></div>
+  </section>
+
+  <div class="wrap">
+    <div id="chartWrap">
+      <canvas id="chart"></canvas>
+    </div>
+  </div>
+
+  <footer class="wrap">
+    מתעדכן כל ~5 שניות. אם העמוד לא מתעדכן – בדוק מפתחי דפדפן (F12) או את לוגי השרת: <code>~/doge_bot/logs/dashboard.log</code>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0"></script>
+  <script>
+    const fmt = (n, d=6) => (n==null ? "—" : Number(n).toFixed(d));
+    const el = id => document.getElementById(id);
+
+    // Chart setup
+    const ctx = document.getElementById('chart').getContext('2d');
+    const priceData = [];
+    const timeLabels = [];
+    const MAX_POINTS = 300; // ~25 דקות בקצב 5ש'
+
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: timeLabels,
+        datasets: [{
+          label: 'DOGE/USDT',
+          data: priceData,
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.2
+        }]
+      },
+      options: {
+        responsive: true,
+        interaction: { intersect: false, mode: 'nearest' },
+        parsing: false,
+        scales: {
+          x: { ticks: { color: '#a9beff' }, grid: { color:'#1b2448' } },
+          y: { ticks: { color: '#a9beff' }, grid: { color:'#1b2448' } }
+        },
+        plugins: {
+          legend: { display: false },
+          annotation: { annotations: {} }
+        }
+      }
+    });
+
+    function setGridLines(levels) {
+      const anns = {};
+      (levels || []).forEach((y, i) => {
+        anns['g'+i] = {
+          type: 'line',
+          yMin: y, yMax: y,
+          borderWidth: 1,
+          borderColor: '#33427a',
+          borderDash: [4,4]
+        };
+      });
+      chart.options.plugins.annotation.annotations = anns;
+      chart.update();
+    }
+
+    function pushPoint(tsMs, price) {
+      const t = new Date(tsMs);
+      const hh = String(t.getHours()).padStart(2,'0');
+      const mm = String(t.getMinutes()).padStart(2,'0');
+      const ss = String(t.getSeconds()).padStart(2,'0');
+      timeLabels.push(`${hh}:${mm}:${ss}`);
+      priceData.push(price);
+      if (timeLabels.length > MAX_POINTS) { timeLabels.shift(); priceData.shift(); }
+      chart.update('none');
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch('/api/snapshot', { cache: 'no-store' });
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.error || 'unknown');
+
+        el('subtitle').textContent = new Date(j.ts).toLocaleString();
+        el('pairPill').textContent = j.pair;
+        el('spacingPill').textContent = j.config.spacing_pct.toFixed(2);
+        el('basePill').textContent = j.config.base_order_usd.toFixed(2);
+
+        el('price').textContent = fmt(j.last, 6);
+        el('usdtFree').textContent = fmt(j.balances.USDT, 2);
+        el('dogeFree').textContent = fmt(j.balances.DOGE, 0);
+        el('openBuys').textContent = j.open.buys ?? '—';
+        el('openSells').textContent = j.open.sells ?? '—';
+        el('exposure').textContent = j.open.exposure_usd == null ? '—' : j.open.exposure_usd.toFixed(2);
+
+        el('rePool').textContent = fmt(j.profit_split.reinvest_pool_usd, 2);
+        el('bnbPend').textContent = fmt(j.profit_split.bnb_pending_usd, 2);
+        el('nextExtra').textContent = fmt(j.profit_split.next_buy_extra_usd, 2);
+
+        pushPoint(j.ts, j.last);
+        setGridLines(j.grid);
+      } catch (e) {
+        console.warn('poll error', e);
+      }
+    }
+
+    poll();
+    setInterval(poll, 5000);
+  </script>
+</body>
+</html>
