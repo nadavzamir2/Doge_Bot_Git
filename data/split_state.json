@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "split_accumulator_usd": 0.16420510999999893,
+  "bnb_pending_usd": 0.0,
+  "reinvest_pool_usd": 0.0,
+  "total_sent_to_bnb_usd": 0.0,
+  "total_reinvested_usd": 0.0,
+  "last_update_ts": 1756129622.899481,
+  "last_action": "accumulate: +0.1642 (pending chunk)",
+  "min_cost_cache_usd": 0.0,
+  "min_cost_cache_ts": 0.0
+}

@@ -1,82 +1,124 @@
-# utils_stats.py
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Utilities for reading/updating the runtime stats file used by the dashboard.
-Writes to: ~/doge_bot/data/runtime_stats.json
+utils_stats.py
+--------------
+אחראי בלעדית על קובץ הסטטיסטיקות data/runtime_stats.json (SSOT):
+- cumulative_profit_usd
+- bnb_converted_usd
+- splits_count
+- trade_count
+- trigger_amount_usd (מידע עזר לדשבורד)
+- last_update_ts
+- schema_version
 
-Schema expected by dash_server.py:
-{
-  "cumulative_profit_usd": float,
-  "splits_count": int,
-  "bnb_converted_usd": float
-}
+כולל כתיבה אטומית ונעילה בין-תהליכית (fcntl).
 """
 
 from __future__ import annotations
-import json
-import pathlib
-import threading
-from typing import Dict, Any
+import os, json, time, pathlib, contextlib
 
-STATS_FILE = pathlib.Path.home() / "doge_bot" / "data" / "runtime_stats.json"
-STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+# נתיב בסיסי
+DATA_DIR = pathlib.Path.home() / "doge_bot" / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+STATS_FILE = DATA_DIR / "runtime_stats.json"
 
-_STATS_LOCK = threading.Lock()
+SCHEMA_VERSION = 1
+DEFAULT_TRIGGER = float(os.getenv("SPLIT_CHUNK_USD", "4.0"))
 
-_DEFAULT = {
-    "cumulative_profit_usd": 0.0,
-    "splits_count": 0,
-    "bnb_converted_usd": 0.0,
-}
-
-def _safe_float(x, default: float = 0.0) -> float:
+# --------------------------
+# נעילה (fcntl) בין-תהליכית
+# --------------------------
+@contextlib.contextmanager
+def file_lock(path: pathlib.Path):
+    """
+    נעילת קובץ פשוטה (POSIX). מייצרת קובץ .lock צמוד. על macOS/לינוקס זה יעבוד.
+    אם fcntl לא קיים (ווינדוס) – נילון no-op (עדיין כתיבה אטומית עם os.replace).
+    """
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a+")
     try:
-        return float(x)
-    except Exception:
-        return float(default)
+        try:
+            import fcntl  # type: ignore
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            yield
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            # no-op lock
+            yield
+    finally:
+        fh.close()
 
-def _safe_int(x, default: int = 0) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return int(default)
+def _atomic_write_json(path: pathlib.Path, obj: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
-def read_stats() -> Dict[str, Any]:
-    """Read stats JSON; if missing/invalid, return defaults."""
+def _defaults() -> dict:
+    now = time.time()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "cumulative_profit_usd": 0.0,
+        "bnb_converted_usd": 0.0,
+        "splits_count": 0,
+        "trade_count": 0,
+        "trigger_amount_usd": DEFAULT_TRIGGER,
+        "last_update_ts": now,
+    }
+
+def _hydrate(d: dict) -> dict:
+    base = _defaults()
+    if isinstance(d, dict):
+        base.update({k: v for k, v in d.items() if k in base})
+        # שמירה על schema_version עדכני
+        base["schema_version"] = SCHEMA_VERSION
+    return base
+
+def read_stats() -> dict:
     try:
         if STATS_FILE.exists():
-            with STATS_FILE.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return {
-                    "cumulative_profit_usd": _safe_float(data.get("cumulative_profit_usd", 0.0)),
-                    "splits_count": _safe_int(data.get("splits_count", 0)),
-                    "bnb_converted_usd": _safe_float(data.get("bnb_converted_usd", 0.0)),
-                }
+            with file_lock(STATS_FILE):
+                with open(STATS_FILE, "r", encoding="utf-8") as f:
+                    return _hydrate(json.load(f))
     except Exception:
         pass
-    return dict(_DEFAULT)
+    return _defaults()
 
-def write_stats(data: Dict[str, Any]) -> None:
-    """Write stats atomically."""
-    norm = {
-        "cumulative_profit_usd": _safe_float(data.get("cumulative_profit_usd", 0.0)),
-        "splits_count": _safe_int(data.get("splits_count", 0)),
-        "bnb_converted_usd": _safe_float(data.get("bnb_converted_usd", 0.0)),
-    }
-    tmp = STATS_FILE.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(norm, f, ensure_ascii=False)
-    tmp.replace(STATS_FILE)
+def write_stats(d: dict) -> None:
+    d = _hydrate(d)
+    d["last_update_ts"] = time.time()
+    with file_lock(STATS_FILE):
+        _atomic_write_json(STATS_FILE, d)
 
-def add_realized_profit(profit_usd: float, *, inc_splits: int = 0, add_bnb_usd: float = 0.0) -> None:
+# --------------------------
+# עדכונים פומביים
+# --------------------------
+
+def add_realized_profit(delta_usd: float, inc_splits: int = 0, inc_trades: int = 0) -> dict:
     """
-    Thread-safe additive update to cumulative stats.
-    Use this after you compute realized PnL (e.g., after SELL that closes BUY inventory).
+    מוסיף רווח/הפסד ממומש; מגדיל מונה ספליטים/טריידים (אם נמסרו).
+    מחזיר מצב מעודכן (dict).
     """
-    with _STATS_LOCK:
-        s = read_stats()
-        s["cumulative_profit_usd"] = _safe_float(s.get("cumulative_profit_usd", 0.0)) + _safe_float(profit_usd)
-        s["splits_count"] = _safe_int(s.get("splits_count", 0)) + _safe_int(inc_splits)
-        s["bnb_converted_usd"] = _safe_float(s.get("bnb_converted_usd", 0.0)) + _safe_float(add_bnb_usd)
-        write_stats(s)
+    st = read_stats()
+    if delta_usd:
+        st["cumulative_profit_usd"] = float(st.get("cumulative_profit_usd", 0.0) + float(delta_usd))
+    if inc_splits:
+        st["splits_count"] = int(st.get("splits_count", 0)) + int(inc_splits)
+    if inc_trades:
+        st["trade_count"] = int(st.get("trade_count", 0)) + int(inc_trades)
+    write_stats(st)
+    return st
+
+def add_bnb_converted_usd(delta_usd: float) -> dict:
+    st = read_stats()
+    st["bnb_converted_usd"] = float(st.get("bnb_converted_usd", 0.0) + float(delta_usd))
+    write_stats(st)
+    return st
+
+def set_trigger_amount_usd(v: float) -> dict:
+    st = read_stats()
+    st["trigger_amount_usd"] = float(v)
+    write_stats(st)
+    return st

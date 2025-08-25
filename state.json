@@ -1,8 +1,48 @@
 {
-  "split_accumulator_usd": 0.8752909599999977,
-  "bnb_pending_usd": 0.0,
-  "reinvest_pool_usd": 0.0,
-  "total_sent_to_bnb_usd": 0.0,
-  "total_reinvested_usd": 0.0,
-  "last_update_ts": 1756069049.4064481
+  "processed_buys": [],
+  "child_sells": {},
+  "buy_fills": {},
+  "sell_fills": {
+    "11650548706": {
+      "price": 0.2347,
+      "amount": 21.0
+    },
+    "11650548774": {
+      "price": 0.23657,
+      "amount": 21.0
+    },
+    "11650548816": {
+      "price": 0.23847,
+      "amount": 20.0
+    },
+    "11650548827": {
+      "price": 0.23515,
+      "amount": 20.0
+    },
+    "11650548954": {
+      "price": 0.24037,
+      "amount": 20.0
+    },
+    "11650549202": {
+      "price": 0.2423,
+      "amount": 20.0
+    },
+    "11650549312": {
+      "price": 0.24423,
+      "amount": 20.0
+    },
+    "11650707542": {
+      "price": 0.23382,
+      "amount": 20.0
+    },
+    "11650761789": {
+      "price": 0.23328,
+      "amount": 20.0
+    },
+    "11672754734": {
+      "price": 0.22063,
+      "amount": 21.0
+    }
+  },
+  "realized_profit_usd": 0.0
 }
