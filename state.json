@@ -1,7 +1,16 @@
 {
-  "processed_buys": [],
-  "child_sells": {},
-  "buy_fills": {},
+  "processed_buys": [
+    "11650548268"
+  ],
+  "child_sells": {
+    "11650548268": "11678925775"
+  },
+  "buy_fills": {
+    "11650548268": {
+      "price": 0.22733,
+      "amount": 21.0
+    }
+  },
   "sell_fills": {
     "11650548706": {
       "price": 0.2347,
