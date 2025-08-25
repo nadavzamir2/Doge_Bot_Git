@@ -21,8 +21,9 @@ def round_price(price: float,
         if step > 0:
             return math.floor(price / step) * step
     if price_precision is not None:
-        fmt = "{:0." + str(int(price_precision)) + "f}"
-        return float(fmt.format(price))
+        # Use floor to avoid rounding up which can exceed allowed price
+        factor = 10 ** int(price_precision)
+        return math.floor(price * factor) / factor
     return price
 
 # utils_stats.py  (או בכל קובץ משותף בבוט)
