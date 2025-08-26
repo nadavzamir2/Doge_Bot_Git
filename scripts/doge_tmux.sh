@@ -1,103 +1,176 @@
 #!/usr/bin/env bash
+# DOGE Trading Bot - Tmux Session Manager
+# 
+# This script manages a tmux session for running the DOGE trading bot.
+# It provides functionality to start, stop, restart, attach to, and monitor
+# the bot process with comprehensive logging support.
+
 set -euo pipefail
 
-SESSION="doge"
-PROJDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOGDIR="$PROJDIR/logs"
-LOGFILE="$LOGDIR/run_$(date +%F).log"
+# Configuration
+readonly SESSION_NAME="doge"
+readonly PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly LOG_DIR="$PROJECT_DIR/logs"
+readonly LOG_FILE="$LOG_DIR/run_$(date +%F).log"
 
-need() { command -v "$1" >/dev/null 2>&1 || { echo "❌ Missing '$1'"; return 1; }; }
-
-ensure_tmux() {
-  if ! command -v tmux >/dev/null 2>&1; then
-    echo "❌ tmux לא מותקן."
-    echo "התקנה במק עם Homebrew:  brew install tmux"
-    exit 1
-  fi
+# Utility functions
+check_command() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "❌ Missing required command: '$1'"
+        return 1
+    }
 }
 
-ensure_env() {
-  [[ -f "$PROJDIR/venv/bin/activate" ]] || { echo "❌ לא נמצא venv. צור אחד:  python3 -m venv venv"; exit 1; }
-  [[ -f "$PROJDIR/main.py" ]] || { echo "❌ main.py לא קיים ב-$PROJDIR"; exit 1; }
-  mkdir -p "$LOGDIR"
+ensure_tmux_available() {
+    if ! check_command tmux; then
+        echo "❌ tmux is not installed."
+        echo "Install on macOS with Homebrew: brew install tmux"
+        echo "Install on Ubuntu/Debian: sudo apt-get install tmux"
+        exit 1
+    fi
 }
 
-start() {
-  ensure_tmux
-  ensure_env
-  if tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "ℹ️  סשן '$SESSION' כבר קיים. השתמש: $0 attach"
-    exit 0
-  fi
-
-  echo "▶️  מפעיל סשן tmux '$SESSION' ומריץ את הבוט..."
-  # מריץ בתיקיית הפרויקט; מפעיל venv; רושם לוגים מתגלגלים לפי תאריך
-  tmux new-session -d -s "$SESSION" -c "$PROJDIR" \
-    "bash -lc 'source venv/bin/activate && mkdir -p \"$LOGDIR\" && echo \"---- \$(date) starting bot ----\" >> \"$LOGFILE\" && exec python3 main.py >> \"$LOGFILE\" 2>&1'"
-
-  echo "✅ הופעל. ראה לוגים: tail -f \"$LOGFILE\""
-  echo "הצטרפות לסשן: $0 attach"
+ensure_environment() {
+    # Check for virtual environment
+    if [[ ! -f "$PROJECT_DIR/venv/bin/activate" ]]; then
+        echo "❌ Virtual environment not found. Create one with:"
+        echo "  python3 -m venv venv"
+        exit 1
+    fi
+    
+    # Check for main bot script
+    if [[ ! -f "$PROJECT_DIR/main.py" ]]; then
+        echo "❌ main.py not found in $PROJECT_DIR"
+        exit 1
+    fi
+    
+    # Ensure log directory exists
+    mkdir -p "$LOG_DIR"
 }
 
-stop() {
-  if tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "⏹️  עוצר את הסשן '$SESSION'..."
-    tmux kill-session -t "$SESSION"
-    echo "✅ נעצר."
-  else
-    echo "ℹ️  אין סשן '$SESSION'. מנסה לעצור תהליך ריצה (pkill)..."
-    pkill -f "python3 main.py" 2>/dev/null && echo "✅ הופסק תהליך python" || echo "ℹ️ לא נמצא תהליך פעיל."
-  fi
+# Command functions
+start_bot() {
+    ensure_tmux_available
+    ensure_environment
+    
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "ℹ️  Session '$SESSION_NAME' already exists. Use: $0 attach"
+        exit 0
+    fi
+
+    echo "▶️  Starting tmux session '$SESSION_NAME' and running bot..."
+    
+    # Create tmux session and run bot with logging
+    tmux new-session -d -s "$SESSION_NAME" -c "$PROJECT_DIR" \
+        "bash -lc 'source venv/bin/activate && mkdir -p \"$LOG_DIR\" && echo \"---- \$(date) Bot starting ----\" >> \"$LOG_FILE\" && exec python3 main.py >> \"$LOG_FILE\" 2>&1'"
+
+    echo "✅ Bot started successfully!"
+    echo "View logs: tail -f \"$LOG_FILE\""
+    echo "Attach to session: $0 attach"
 }
 
-restart() { stop; sleep 1; start; }
-
-attach() {
-  ensure_tmux
-  if tmux has-session -t "$SESSION" 2>/dev/null; then
-    tmux attach -t "$SESSION"
-  else
-    echo "ℹ️  אין סשן '$SESSION'. הפעלה: $0 start"
-  fi
+stop_bot() {
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "⏹️  Stopping tmux session '$SESSION_NAME'..."
+        tmux kill-session -t "$SESSION_NAME"
+        echo "✅ Session stopped."
+    else
+        echo "ℹ️  No session '$SESSION_NAME' found. Attempting to stop process (pkill)..."
+        if pkill -f "python3 main.py" 2>/dev/null; then
+            echo "✅ Python process stopped."
+        else
+            echo "ℹ️ No active process found."
+        fi
+    fi
 }
 
-logs() {
-  mkdir -p "$LOGDIR"
-  echo "📜 עוקב אחרי לוג: $LOGFILE"
-  tail -n 100 -f "$LOGFILE"
+restart_bot() {
+    stop_bot
+    sleep 1
+    start_bot
 }
 
-status() {
-  if tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "✅ tmux session '$SESSION' RUNNING"
-  else
-    echo "❌ tmux session '$SESSION' not running"
-  fi
-  echo "אחרוני הלוגים:"
-  [[ -f "$LOGFILE" ]] && tail -n 30 "$LOGFILE" || echo "(אין עדיין קובץ לוג)"
+attach_to_session() {
+    ensure_tmux_available
+    
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        tmux attach -t "$SESSION_NAME"
+    else
+        echo "ℹ️  No session '$SESSION_NAME' found. Start with: $0 start"
+    fi
 }
 
-usage() {
-  cat <<USAGE
-שימוש: $0 {start|stop|restart|attach|logs|status}
+show_logs() {
+    mkdir -p "$LOG_DIR"
+    echo "📜 Following log file: $LOG_FILE"
+    
+    if [[ -f "$LOG_FILE" ]]; then
+        tail -n 100 -f "$LOG_FILE"
+    else
+        echo "❌ Log file not found. Bot may not be running."
+    fi
+}
 
-  start    – מפעיל סשן tmux ומריץ את הבוט עם לוגים לתוך: $LOGFILE
-  stop     – עוצר את הסשן (או את התהליך אם אין סשן)
-  restart  – מפסיק ומפעיל מחדש
-  attach   – נכנס לסשן tmux (לצפייה בזמן אמת)
-  logs     – tail על הלוג של היום
-  status   – מצב ריצה + 30 שורות אחרונות מלוג
+show_status() {
+    echo "=== DOGE Bot Status ==="
+    
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "✅ tmux session '$SESSION_NAME' is RUNNING"
+    else
+        echo "❌ tmux session '$SESSION_NAME' is NOT running"
+    fi
+    
+    echo ""
+    echo "Recent log entries:"
+    if [[ -f "$LOG_FILE" ]]; then
+        tail -n 30 "$LOG_FILE"
+    else
+        echo "(No log file found yet)"
+    fi
+}
+
+show_usage() {
+    cat <<USAGE
+DOGE Trading Bot - Tmux Manager
+
+Usage: $0 {start|stop|restart|attach|logs|status}
+
+Commands:
+  start    - Start tmux session and run bot with logging to: $LOG_FILE
+  stop     - Stop the session (or process if no session exists)
+  restart  - Stop and start the bot
+  attach   - Attach to tmux session (for real-time monitoring)
+  logs     - Follow today's log file
+  status   - Show running status and recent log entries
+
+Examples:
+  $0 start          # Start the bot
+  $0 attach         # Monitor the bot in real-time
+  $0 logs           # Watch log output
+  $0 stop           # Stop the bot
 
 USAGE
 }
 
-cmd="${1:-status}"
-case "$cmd" in
-  start)   start   ;;
-  stop)    stop    ;;
-  restart) restart ;;
-  attach)  attach  ;;
-  logs)    logs    ;;
-  status)  status  ;;
-  *) usage; exit 1 ;;
-esac
+# Main command dispatch
+main() {
+    local command="${1:-status}"
+    
+    case "$command" in
+        start)   start_bot        ;;
+        stop)    stop_bot         ;;
+        restart) restart_bot      ;;
+        attach)  attach_to_session ;;
+        logs)    show_logs        ;;
+        status)  show_status      ;;
+        help|-h|--help) show_usage ;;
+        *) 
+            echo "❌ Unknown command: $command"
+            show_usage
+            exit 1
+            ;;
+    esac
+}
+
+# Execute main function with all arguments
+main "$@"
