@@ -443,6 +443,17 @@ HTML = r"""<!doctype html>
   .controls select, .controls input[type="text"] {
     font-size:12px; padding:4px 6px; border:1px solid var(--grid); border-radius:8px; background:#fff;
   }
+  
+  /* Improved highlighting colors for better visual comfort */
+  .highlight-order {
+    background-color: rgba(59, 130, 246, 0.08) !important; /* Light blue instead of yellow */
+    border-left: 3px solid rgba(59, 130, 246, 0.4);
+  }
+  
+  /* Purple grid boundary highlighting */
+  .grid-boundary {
+    color: #8b5cf6 !important;
+  }
 </style>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -451,10 +462,10 @@ HTML = r"""<!doctype html>
     <div class="topbar">
       <h1>DOGE Grid Monitor — <span id="pair" class="mono"></span> <span id="lastUpdated" class="last-update">Last updated —</span></h1>
       <div class="top-actions">
-        <button id="btnRefresh" class="icon-btn" title="Refresh">🔄</button>
-        <button id="btnStop" class="icon-btn" title="Stop bot">⏹️</button>
-        <button id="btnResume" class="icon-btn" title="Resume">▶️</button>
-        <button id="btnCancel" class="icon-btn" title="Cancel all orders">❌</button>
+        <button id="btnRefresh" class="icon-btn" title="Refresh all data (orders, history, stats)">🔄</button>
+        <button id="btnStop" class="icon-btn" title="Stop the trading bot">⏹️</button>
+        <button id="btnResume" class="icon-btn" title="Resume the trading bot">▶️</button>
+        <button id="btnCancel" class="icon-btn" title="Cancel all open orders">❌</button>
       </div>
     </div>
 
@@ -892,7 +903,36 @@ function applyGridTicks(){
       return;
     }
     
-    const levels = buildAllLevels();
+    let levels = buildAllLevels();
+    const currentPrice = window.__currentPrice;
+    
+    // Enhance grid with additional lines above and below existing levels
+    if (currentPrice && !isNaN(currentPrice) && levels.length > 0) {
+      const sortedLevels = [...levels].sort((a, b) => a - b);
+      const minLevel = sortedLevels[0];
+      const maxLevel = sortedLevels[sortedLevels.length - 1];
+      
+      // Calculate step size for additional lines
+      const avgStep = sortedLevels.length > 1 ? 
+        (maxLevel - minLevel) / (sortedLevels.length - 1) : 
+        currentPrice * 0.01; // 1% if we can't calculate from existing levels
+      
+      // Add additional lines below minimum
+      for (let i = 1; i <= 3; i++) {
+        const newLevel = minLevel - (avgStep * i);
+        if (newLevel > 0) levels.push(newLevel);
+      }
+      
+      // Add additional lines above maximum  
+      for (let i = 1; i <= 3; i++) {
+        const newLevel = maxLevel + (avgStep * i);
+        levels.push(newLevel);
+      }
+      
+      // Sort the enhanced levels
+      levels = [...new Set(levels)].sort((a, b) => a - b);
+    }
+    
     const yTicksVals = levels;
     const yTicksText = levels.map(v => Number(v).toFixed(6));
     const rel = {
@@ -920,7 +960,36 @@ function addGridShapesDynamic(currentPrice, showAll){
     const lay = fig._fullLayout || {};
     const shapes = [];
 
-    const levels = buildAllLevels();
+    let levels = buildAllLevels();
+    const currentPrice = window.__currentPrice;
+    
+    // Enhance grid with additional lines above and below existing levels
+    if (currentPrice && !isNaN(currentPrice) && levels.length > 0) {
+      const sortedLevels = [...levels].sort((a, b) => a - b);
+      const minLevel = sortedLevels[0];
+      const maxLevel = sortedLevels[sortedLevels.length - 1];
+      
+      // Calculate step size for additional lines
+      const avgStep = sortedLevels.length > 1 ? 
+        (maxLevel - minLevel) / (sortedLevels.length - 1) : 
+        currentPrice * 0.01; // 1% if we can't calculate from existing levels
+      
+      // Add additional lines below minimum
+      for (let i = 1; i <= 3; i++) {
+        const newLevel = minLevel - (avgStep * i);
+        if (newLevel > 0) levels.push(newLevel);
+      }
+      
+      // Add additional lines above maximum  
+      for (let i = 1; i <= 3; i++) {
+        const newLevel = maxLevel + (avgStep * i);
+        levels.push(newLevel);
+      }
+      
+      // Sort the enhanced levels and remove duplicates
+      levels = [...new Set(levels)].sort((a, b) => a - b);
+    }
+    
     if (!levels.length) {
       Plotly.relayout('chart', { shapes });
       return;
@@ -930,19 +999,39 @@ function addGridShapesDynamic(currentPrice, showAll){
     const thinSell = 'rgba(243, 156, 18, 0.25)';   // light orange
     const boldBuy  = 'rgba(46, 204, 113, 0.60)';   // emphasized
     const boldSell = 'rgba(243, 156, 18, 0.60)';
+    const purpleBoundary = 'rgba(139, 92, 246, 0.8)'; // purple for boundaries
 
     // nearest lines around current price
     const {below, above} = nearestBracket(levels, currentPrice);
+    
+    // find topmost and bottommost levels for purple highlighting
+    const sortedLevels = [...levels].sort((a, b) => a - b);
+    const bottomLevel = sortedLevels[0];
+    const topLevel = sortedLevels[sortedLevels.length - 1];
 
     for (const y of levels){
       if (!isFinite(y)) continue; // Skip invalid levels
       
       const isBuy = (currentPrice != null && !isNaN(currentPrice)) ? (y <= currentPrice) : false;
       const isEmph = (y === below) || (y === above);
-      if (isEmph || showAll){
-        const color = isBuy ? (isEmph ? boldBuy : thinBuy) : (isEmph ? boldSell : thinSell);
-        const width = isEmph ? 2.5 : 1;
-        shapes.push(shapeForY(y, color, width, 'dot'));
+      const isBoundary = (y === bottomLevel) || (y === topLevel);
+      
+      if (isEmph || showAll || isBoundary){
+        let color, width;
+        
+        if (isBoundary) {
+          // Purple highlighting for grid boundaries
+          color = purpleBoundary;
+          width = 3;
+        } else if (isEmph) {
+          color = isBuy ? boldBuy : boldSell;
+          width = 2.5;
+        } else {
+          color = isBuy ? thinBuy : thinSell;
+          width = 1;
+        }
+        
+        shapes.push(shapeForY(y, color, width, isBoundary ? 'solid' : 'dot'));
       }
     }
 
@@ -1159,6 +1248,32 @@ function renderOpenOrders(){
 
   document.getElementById('openCount').textContent = `(${rows.length})`;
 
+  // Find nearest buy and sell orders to current price
+  const currentPrice = window.__currentPrice;
+  let nearestBuy = null, nearestSell = null;
+  let nearestBuyDist = Infinity, nearestSellDist = Infinity;
+  
+  if (currentPrice && !isNaN(currentPrice)) {
+    rows.forEach(o => {
+      const price = parseFloat(o.price);
+      if (!isFinite(price)) return;
+      
+      if (o.side === 'buy' && price <= currentPrice) {
+        const dist = currentPrice - price;
+        if (dist < nearestBuyDist) {
+          nearestBuyDist = dist;
+          nearestBuy = o;
+        }
+      } else if (o.side === 'sell' && price >= currentPrice) {
+        const dist = price - currentPrice;
+        if (dist < nearestSellDist) {
+          nearestSellDist = dist;
+          nearestSell = o;
+        }
+      }
+    });
+  }
+
   rows.forEach((o,idx)=>{
     const tr = document.createElement('tr');
     tr.innerHTML = `
@@ -1167,7 +1282,12 @@ function renderOpenOrders(){
       <td class="mono">${fmt(o.price, 6)}</td>
       <td class="mono">${fmt(o.amount, 2)}</td>
       <td class="mono">${fmt2(o.value_usdt)}</td>`;
-    if(idx < 2){ tr.style.backgroundColor = 'yellow'; tr.style.fontWeight = 'bold'; }
+    
+    // Highlight nearest buy or sell order instead of first 2 rows
+    if (o === nearestBuy || o === nearestSell) {
+      tr.className = 'highlight-order';
+    }
+    
     tb.appendChild(tr);
   });
 }
@@ -1286,6 +1406,32 @@ function wireControls(){
   if(resumeBtn) resumeBtn.addEventListener('click', ()=>{ fetch('/api/resume_bot', {method:'POST'}); });
   const cancelBtn = document.getElementById('btnCancel');
   if(cancelBtn) cancelBtn.addEventListener('click', ()=>{ fetch('/api/cancel_all_orders', {method:'POST'}); });
+
+  // Persist collapsible states for dashboard components
+  function persistCollapsibleState(){
+    ['chartBox', 'openBox', 'histBox'].forEach(id => {
+      const element = document.getElementById(id);
+      if (!element) return;
+      
+      const key = `ui.${id}.open`;
+      // Restore state
+      try {
+        const saved = localStorage.getItem(key);
+        if (saved !== null) {
+          element.open = JSON.parse(saved);
+        }
+      } catch(_) {}
+      
+      // Save state on toggle
+      element.addEventListener('toggle', () => {
+        try {
+          localStorage.setItem(key, JSON.stringify(element.open));
+        } catch(_) {}
+      });
+    });
+  }
+  
+  persistCollapsibleState();
 
   renderOpenOrders();
   renderHistOrders();
