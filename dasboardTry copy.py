@@ -522,7 +522,7 @@ const GRID_STEP_PCT = {{ grid_step_pct|tojson }};
   const r = document.getElementById('rangeVal');
   const s = document.getElementById('spacingVal');
   if (GRID_MIN != null && GRID_MAX != null) {
-    r.textContent = `${Number(GRID_MIN).toFixed(6)} – ${Number(GRID_MAX).toFixed(6)}`;
+    r.textContent = `${Number(GRID_MIN).toFixed(6).replace(/^\./, '0.')} – ${Number(GRID_MAX).toFixed(6).replace(/^\./, '0.')}`;
   } else {
     r.textContent = '—';
   }
@@ -614,7 +614,7 @@ function buildShapesFromLevels(levels, currentPrice){
 function updateYAxisTicksFromLevels(levels){
   const vals = uniqSorted([...(levels.buys||[]), ...(levels.sells||[])]);
   _tickVals = vals;
-  const ticktext = vals.map(v=>Number(v).toFixed(6));
+  const ticktext = vals.map(v=>Number(v).toFixed(6).replace(/^\./, '0.'));
   const layoutUpdate = {
     yaxis: {
       tickmode: "array",
