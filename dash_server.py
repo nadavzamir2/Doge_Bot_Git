@@ -259,6 +259,19 @@ def stream():
 @app.get("/history")
 def history_endpoint():
     with HISTORY_LOCK:
+        # If no real data, provide some test data for demonstration
+        if not PRICE_WINDOW:
+            import time
+            now = int(time.time() * 1000)
+            test_data = []
+            # Generate test data around the grid boundaries (0.215000 and 0.250000)
+            base_prices = [0.220000, 0.225000, 0.230000, 0.235000, 0.240000, 0.245000]
+            for i, price in enumerate(base_prices):
+                test_data.append({
+                    "t": now - (len(base_prices) - i) * 60000,  # 1 minute intervals
+                    "p": price
+                })
+            return {"data": test_data}
         return {"data": list(PRICE_WINDOW)}
 
 @app.get("/api/stats")
@@ -416,8 +429,24 @@ HTML = r"""<!doctype html>
   h1 { margin: 4px 0 16px; font-size: 22px; display:flex; align-items:center; gap:12px; }
   .last-update { font-size:14px; color:var(--muted); }
   .top-actions { display:flex; gap:6px; }
-  .icon-btn { border:1px solid var(--grid); background:var(--card); border-radius:8px; padding:4px 6px; cursor:pointer; }
+  .icon-btn { border:1px solid var(--grid); background:var(--card); border-radius:8px; padding:4px 6px; cursor:pointer; position: relative; }
   .icon-btn:hover { background:#f5f5f5; }
+  /* Enhanced tooltip styling for buttons */
+  .icon-btn[title]:hover::after {
+    content: attr(title);
+    position: absolute;
+    bottom: -35px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    white-space: nowrap;
+    z-index: 1000;
+    pointer-events: none;
+  }
   .cards { display:grid; grid-template-columns: repeat(5, minmax(160px,1fr)); gap:12px; margin-bottom:16px; }
   .card { background:var(--card); border:1px solid var(--grid); border-radius:12px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
   .card h3 { margin:0 0 6px; font-size:13px; color:var(--muted); font-weight:600; }
@@ -444,10 +473,11 @@ HTML = r"""<!doctype html>
     font-size:12px; padding:4px 6px; border:1px solid var(--grid); border-radius:8px; background:#fff;
   }
   
-  /* Improved highlighting colors for better visual comfort */
+  /* Light yellow highlighting for better visibility */
   .highlight-order {
-    background-color: rgba(59, 130, 246, 0.08) !important; /* Light blue instead of yellow */
-    border-left: 3px solid rgba(59, 130, 246, 0.4);
+    background-color: rgba(255, 251, 125, 0.3) !important; /* Light yellow background */
+    font-weight: bold !important; /* Bold text */
+    border-left: 3px solid rgba(255, 193, 7, 0.8);
   }
   
   /* Purple grid boundary highlighting */
@@ -505,6 +535,26 @@ HTML = r"""<!doctype html>
       <details open id="chartBox">
         <summary>Price Chart</summary>
         <div class="section-body">
+          <!-- Color Legend -->
+          <div style="margin-bottom: 12px; padding: 8px; background: #f8f9fa; border-radius: 6px; font-size: 12px;">
+            <strong>Chart Legend:</strong>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(46, 204, 113, 0.6); margin-right: 4px;"></span>
+              <span style="color: #2c7a7b;">Buy Orders</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(243, 156, 18, 0.6); margin-right: 4px;"></span>
+              <span style="color: #c53030;">Sell Orders</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(139, 92, 246, 0.8); margin-right: 4px;"></span>
+              <span style="color: #8b5cf6;">Grid Boundaries</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 1px; background: #cccccc; margin-right: 4px;"></span>
+              <span style="color: #666;">Gray Latitudes</span>
+            </span>
+          </div>
           <div style="display:flex;gap:12px;margin-bottom:8px;flex-wrap:wrap">
             <label style="display:flex;align-items:center;gap:6px;user-select:none">
               <input id="showGrid" type="checkbox" checked/>
@@ -990,6 +1040,21 @@ function addGridShapesDynamic(currentPrice, showAll){
       levels = [...new Set(levels)].sort((a, b) => a - b);
     }
     
+    // Define specific grid boundaries that should always be purple and visible
+    const GRID_BOUNDARY_LOWER = 0.215000;
+    const GRID_BOUNDARY_UPPER = 0.250000;
+    
+    // Add boundaries to levels if not already present
+    if (!levels.includes(GRID_BOUNDARY_LOWER)) {
+      levels.push(GRID_BOUNDARY_LOWER);
+    }
+    if (!levels.includes(GRID_BOUNDARY_UPPER)) {
+      levels.push(GRID_BOUNDARY_UPPER);
+    }
+    
+    // Re-sort after adding boundaries
+    levels = [...new Set(levels)].sort((a, b) => a - b);
+    
     if (!levels.length) {
       Plotly.relayout('chart', { shapes });
       return;
@@ -1014,13 +1079,16 @@ function addGridShapesDynamic(currentPrice, showAll){
       
       const isBuy = (currentPrice != null && !isNaN(currentPrice)) ? (y <= currentPrice) : false;
       const isEmph = (y === below) || (y === above);
-      const isBoundary = (y === bottomLevel) || (y === topLevel);
+      const isBoundary = (y === bottomLevel) || (y === topLevel) || 
+                        (Math.abs(y - GRID_BOUNDARY_LOWER) < 1e-6) || 
+                        (Math.abs(y - GRID_BOUNDARY_UPPER) < 1e-6);
       
+      // Always show boundary lines, emphasis lines, or all lines when showAll is true
       if (isEmph || showAll || isBoundary){
         let color, width;
         
         if (isBoundary) {
-          // Purple highlighting for grid boundaries
+          // Purple highlighting for grid boundaries - always visible regardless of checkbox state
           color = purpleBoundary;
           width = 3;
         } else if (isEmph) {
@@ -1039,6 +1107,27 @@ function addGridShapesDynamic(currentPrice, showAll){
     applyGridTicks();
   } catch (e) {
     console.error('Error adding grid shapes:', e);
+  }
+}
+
+/* Force full chart re-render */
+function forceChartRerender() {
+  if (!_chartReady) return;
+  
+  try {
+    const chartEl = document.getElementById('chart');
+    if (!chartEl) return;
+    
+    // Clear the chart completely
+    Plotly.purge('chart');
+    _chartReady = false;
+    
+    // Recreate the chart with current data
+    setTimeout(async () => {
+      await loadHistory();
+    }, 100);
+  } catch (e) {
+    console.error('Error in force chart rerender:', e);
   }
 }
 
@@ -1386,6 +1475,8 @@ function wireControls(){
   try{ const saved = localStorage.getItem('ui.showGrid'); if(saved!==null) showGridEl.checked = JSON.parse(saved)?true:false; }catch(_){}
   showGridEl.addEventListener('change', ()=>{
     try{ localStorage.setItem('ui.showGrid', JSON.stringify(showGridEl.checked)); }catch(_){}
+    // Force full chart re-render
+    forceChartRerender();
     maybeAddGridLines();
   });
 
@@ -1393,6 +1484,8 @@ function wireControls(){
   try{ const savedL = localStorage.getItem('ui.showLat'); if(savedL!==null) showLatEl.checked = JSON.parse(savedL)?true:false; }catch(_){}
   showLatEl.addEventListener('change', ()=>{
     try{ localStorage.setItem('ui.showLat', JSON.stringify(showLatEl.checked)); }catch(_){}
+    // Force full chart re-render
+    forceChartRerender();
     maybeAddGridLines();
   });
 
