@@ -675,7 +675,7 @@ const GRID_STEP_PCT = {{ grid_step_pct|tojson }};
   const r = document.getElementById('rangeVal');
   const s = document.getElementById('spacingVal');
   if (GRID_MIN != null && GRID_MAX != null) {
-    r.textContent = `${Number(GRID_MIN).toFixed(6)} – ${Number(GRID_MAX).toFixed(6)}`;
+    r.textContent = `${Number(GRID_MIN).toFixed(6).replace(/^\./, '0.')} – ${Number(GRID_MAX).toFixed(6).replace(/^\./, '0.')}`;
   } else {
     r.textContent = '—';
   }
@@ -1015,7 +1015,7 @@ function applyGridTicks(){
     }
     
     const yTicksVals = levels;
-    const yTicksText = levels.map(v => Number(v).toFixed(6));
+    const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
     const rel = {
       'yaxis.tickmode': (yTicksVals.length? 'array':'auto'),
       'yaxis.tickvals': (yTicksVals.length? yTicksVals: null),
@@ -1187,7 +1187,7 @@ function applyGridTicksCustom(levels) {
   if (!_chartReady) return;
   try {
     const yTicksVals = levels;
-    const yTicksText = levels.map(v => Number(v).toFixed(6));
+    const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
     const rel = {
       'yaxis.tickmode': (yTicksVals.length ? 'array' : 'auto'),
       'yaxis.tickvals': (yTicksVals.length ? yTicksVals : null),
