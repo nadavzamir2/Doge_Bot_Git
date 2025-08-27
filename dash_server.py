@@ -677,6 +677,56 @@ function nearestBracket(levels, price){
 /* ===== Chart bootstrap guard ===== */
 let _chartReady = false;
 
+/* ===== Data validation functions ===== */
+function isValidChartData(data) {
+  if (!Array.isArray(data)) {
+    console.warn('Chart data is not an array:', data);
+    return false;
+  }
+  
+  for (let i = 0; i < data.length; i++) {
+    const point = data[i];
+    if (!point || typeof point !== 'object') {
+      console.warn('Invalid data point at index', i, ':', point);
+      return false;
+    }
+    if (!('t' in point) || !('p' in point)) {
+      console.warn('Data point missing required fields (t, p) at index', i, ':', point);
+      return false;
+    }
+    if (typeof point.p !== 'number' || isNaN(point.p)) {
+      console.warn('Invalid price value at index', i, ':', point.p);
+      return false;
+    }
+  }
+  return true;
+}
+
+function sanitizeChartData(data) {
+  if (!Array.isArray(data)) return [];
+  
+  return data.filter(point => {
+    return point && 
+           typeof point === 'object' && 
+           't' in point && 
+           'p' in point && 
+           typeof point.p === 'number' && 
+           !isNaN(point.p) &&
+           isFinite(point.p);
+  });
+}
+
+function showChartError(message) {
+  console.error('Chart error:', message);
+  const chartEl = document.getElementById('chart');
+  if (chartEl) {
+    chartEl.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--muted); border: 1px dashed #ccc; background: #f9f9f9;">
+      <p style="margin: 0; font-size: 14px;">⚠️ Chart Error</p>
+      <p style="margin: 5px 0 0 0; font-size: 12px;">${message}</p>
+    </div>`;
+  }
+}
+
 /* ===== Update profits cards ===== */
 function setText(id, val, digits=2){
   const el = document.getElementById(id);
@@ -717,12 +767,50 @@ async function loadStats(){
 
 /* ===== history + chart ===== */
 async function loadHistory(){
+  const chartEl = document.getElementById('chart');
+  if (!chartEl) {
+    console.error('Chart element not found');
+    return;
+  }
+
   try{
+    console.log('Loading history data...');
     const r = await fetch('/history');
+    
+    if (!r.ok) {
+      throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+    }
+    
     const j = await r.json();
-    const pts = Array.isArray(j.data)? j.data : [];
+    
+    // Validate response structure
+    if (!j || typeof j !== 'object') {
+      throw new Error('Invalid JSON response from /history');
+    }
+    
+    const rawData = j.data || [];
+    console.log('Raw history data points:', rawData.length);
+    
+    if (!isValidChartData(rawData)) {
+      console.warn('Invalid chart data received, attempting to sanitize...');
+    }
+    
+    const pts = sanitizeChartData(rawData);
+    console.log('Sanitized data points:', pts.length);
+    
+    if (pts.length === 0) {
+      console.warn('No valid data points after sanitization');
+      showChartError('No historical data available');
+      return;
+    }
+
     const xs = pts.map(p => new Date(p.t));
     const ys = pts.map(p => p.p);
+
+    // Validate that we have valid coordinates
+    if (xs.some(x => isNaN(x.getTime())) || ys.some(y => !isFinite(y))) {
+      throw new Error('Invalid time or price values in data');
+    }
 
     const levels = buildAllLevels();
     const yTicksVals = levels;
@@ -742,16 +830,24 @@ async function loadHistory(){
       shapes: []
     };
     const data = [{ x: xs, y: ys, mode:'lines', name: PAIR }];
+    
+    console.log('Creating chart with', data[0].x.length, 'data points');
     await Plotly.react('chart', data, layout, {displayModeBar:false});
     _chartReady = true;
     maybeAddGridLines();
     updateLastUpdated();
+    console.log('Chart loaded successfully');
+    
   }catch(e){
-    console.warn('history load failed', e);
+    console.error('History load failed:', e);
+    
+    // Try to create an empty chart as fallback
     try{
+      console.log('Creating fallback empty chart...');
       const levels = buildAllLevels();
       const yTicksVals = levels;
       const yTicksText = levels.map(v => Number(v).toFixed(6));
+      
       await Plotly.newPlot('chart',
         [{x:[], y:[], mode:'lines', name: PAIR}],
         { margin:{l:50,r:20,t:10,b:40},
@@ -767,7 +863,12 @@ async function loadHistory(){
       _chartReady = true;
       maybeAddGridLines();
       updateLastUpdated();
-    }catch(_){}
+      console.log('Fallback empty chart created');
+      
+    }catch(fallbackError){
+      console.error('Failed to create fallback chart:', fallbackError);
+      showChartError(`Failed to load chart: ${e.message || 'Unknown error'}`);
+    }
   }
 }
 
@@ -783,59 +884,96 @@ function shapeForY(y, color, width, dash){
 
 function applyGridTicks(){
   if (!_chartReady) return;
-  const levels = buildAllLevels();
-  const yTicksVals = levels;
-  const yTicksText = levels.map(v => Number(v).toFixed(6));
-  const rel = {
-    'yaxis.tickmode': (yTicksVals.length? 'array':'auto'),
-    'yaxis.tickvals': (yTicksVals.length? yTicksVals: null),
-    'yaxis.ticktext': (yTicksVals.length? yTicksText: null),
-  };
-  Plotly.relayout('chart', rel);
+  
+  try {
+    const chartEl = document.getElementById('chart');
+    if (!chartEl) {
+      console.warn('Chart element not found for applyGridTicks');
+      return;
+    }
+    
+    const levels = buildAllLevels();
+    const yTicksVals = levels;
+    const yTicksText = levels.map(v => Number(v).toFixed(6));
+    const rel = {
+      'yaxis.tickmode': (yTicksVals.length? 'array':'auto'),
+      'yaxis.tickvals': (yTicksVals.length? yTicksVals: null),
+      'yaxis.ticktext': (yTicksVals.length? yTicksText: null),
+    };
+    Plotly.relayout('chart', rel);
+  } catch (e) {
+    console.error('Error applying grid ticks:', e);
+  }
 }
 
 function addGridShapesDynamic(currentPrice, showAll){
   if (!_chartReady) return;
-  const fig = document.getElementById('chart');
-  const lay = fig._fullLayout || {};
-  const shapes = [];
-
-  const levels = buildAllLevels();
-  if (!levels.length) {
-    Plotly.relayout('chart', { shapes });
-    return;
-  }
-
-  const thinBuy  = 'rgba(46, 204, 113, 0.25)';   // light green
-  const thinSell = 'rgba(243, 156, 18, 0.25)';   // light orange
-  const boldBuy  = 'rgba(46, 204, 113, 0.60)';   // emphasized
-  const boldSell = 'rgba(243, 156, 18, 0.60)';
-
-  // nearest lines around current price
-  const {below, above} = nearestBracket(levels, currentPrice);
-
-  for (const y of levels){
-    const isBuy = (currentPrice != null && !isNaN(currentPrice)) ? (y <= currentPrice) : false;
-    const isEmph = (y === below) || (y === above);
-    if (isEmph || showAll){
-      const color = isBuy ? (isEmph ? boldBuy : thinBuy) : (isEmph ? boldSell : thinSell);
-      const width = isEmph ? 2.5 : 1;
-      shapes.push(shapeForY(y, color, width, 'dot'));
+  
+  try {
+    const chartEl = document.getElementById('chart');
+    if (!chartEl) {
+      console.warn('Chart element not found for addGridShapesDynamic');
+      return;
     }
-  }
+    
+    const fig = chartEl;
+    const lay = fig._fullLayout || {};
+    const shapes = [];
 
-  Plotly.relayout('chart', { shapes });
-  applyGridTicks();
+    const levels = buildAllLevels();
+    if (!levels.length) {
+      Plotly.relayout('chart', { shapes });
+      return;
+    }
+
+    const thinBuy  = 'rgba(46, 204, 113, 0.25)';   // light green
+    const thinSell = 'rgba(243, 156, 18, 0.25)';   // light orange
+    const boldBuy  = 'rgba(46, 204, 113, 0.60)';   // emphasized
+    const boldSell = 'rgba(243, 156, 18, 0.60)';
+
+    // nearest lines around current price
+    const {below, above} = nearestBracket(levels, currentPrice);
+
+    for (const y of levels){
+      if (!isFinite(y)) continue; // Skip invalid levels
+      
+      const isBuy = (currentPrice != null && !isNaN(currentPrice)) ? (y <= currentPrice) : false;
+      const isEmph = (y === below) || (y === above);
+      if (isEmph || showAll){
+        const color = isBuy ? (isEmph ? boldBuy : thinBuy) : (isEmph ? boldSell : thinSell);
+        const width = isEmph ? 2.5 : 1;
+        shapes.push(shapeForY(y, color, width, 'dot'));
+      }
+    }
+
+    Plotly.relayout('chart', { shapes });
+    applyGridTicks();
+  } catch (e) {
+    console.error('Error adding grid shapes:', e);
+  }
 }
 
 function maybeAddGridLines(){
-  const showGridEl = document.getElementById('showGrid');
-  const showLatEl = document.getElementById('showLat');
-  const cp = window.__currentPrice;
-  const showAll = showGridEl ? showGridEl.checked : false;
-  const showLat = showLatEl ? showLatEl.checked : false;
-  Plotly.relayout('chart', { 'yaxis.showgrid': showLat, 'yaxis.gridcolor':'#cccccc' });
-  addGridShapesDynamic(cp, showAll);
+  if (!_chartReady) return;
+  
+  try {
+    const chartEl = document.getElementById('chart');
+    if (!chartEl) {
+      console.warn('Chart element not found for maybeAddGridLines');
+      return;
+    }
+    
+    const showGridEl = document.getElementById('showGrid');
+    const showLatEl = document.getElementById('showLat');
+    const cp = window.__currentPrice;
+    const showAll = showGridEl ? showGridEl.checked : false;
+    const showLat = showLatEl ? showLatEl.checked : false;
+    
+    Plotly.relayout('chart', { 'yaxis.showgrid': showLat, 'yaxis.gridcolor':'#cccccc' });
+    addGridShapesDynamic(cp, showAll);
+  } catch (e) {
+    console.error('Error updating grid lines:', e);
+  }
 }
 
 /* ====== SSE ====== */
@@ -849,15 +987,50 @@ function startSSE(){
     es.addEventListener('tick', async ev=>{
       try{
         const j = JSON.parse(ev.data);
-        if(j && typeof j.p === 'number'){
-          document.getElementById('priceVal').textContent = fmt(j.p, 6);
-          const t = new Date(j.t);
-          window.__currentPrice = Number(j.p);
+        
+        // Validate tick data structure
+        if (!j || typeof j !== 'object') {
+          console.warn('Invalid tick data structure:', j);
+          return;
+        }
+        
+        if (typeof j.p !== 'number' || !isFinite(j.p)) {
+          console.warn('Invalid price in tick data:', j.p);
+          return;
+        }
+        
+        if (!j.t) {
+          console.warn('Missing timestamp in tick data:', j);
+          return;
+        }
 
-          if (!_chartReady){
+        // Update price display
+        const priceEl = document.getElementById('priceVal');
+        if (priceEl) {
+          priceEl.textContent = fmt(j.p, 6);
+        }
+        
+        const t = new Date(j.t);
+        if (isNaN(t.getTime())) {
+          console.warn('Invalid timestamp in tick data:', j.t);
+          return;
+        }
+        
+        window.__currentPrice = Number(j.p);
+
+        const chartEl = document.getElementById('chart');
+        if (!chartEl) {
+          console.warn('Chart element not found for tick update');
+          return;
+        }
+
+        if (!_chartReady){
+          console.log('Chart not ready, initializing with tick data...');
+          try {
             const levels = buildAllLevels();
             const yTicksVals = levels;
             const yTicksText = levels.map(v => Number(v).toFixed(6));
+            
             await Plotly.newPlot('chart',
               [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
               { margin:{l:50,r:20,t:10,b:40},
@@ -873,38 +1046,56 @@ function startSSE(){
             _chartReady = true;
             maybeAddGridLines();
             updateLastUpdated();
-          } else {
-            try {
-              Plotly.extendTraces('chart', {x:[[t]], y:[[j.p]]}, [0], 10000);
-            } catch (e) {
-              try{
-                const levels = buildAllLevels();
-                const yTicksVals = levels;
-                const yTicksText = levels.map(v => Number(v).toFixed(6));
-                await Plotly.newPlot('chart',
-                  [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
-                  { margin:{l:50,r:20,t:10,b:40},
-                    xaxis:{ title:'Time', showgrid:false, tickformat:"%d/%m", hoverformat:"%d/%m/%Y %H:%M:%S" },
-                    yaxis:{ title:'Price (USDT)', showgrid:false,
-                            tickmode: (yTicksVals.length? 'array':'auto'),
-                            tickvals: (yTicksVals.length? yTicksVals: undefined),
-                            ticktext: (yTicksVals.length? yTicksText: undefined),
-                            hoverformat: ".6f" },
-                    paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
-                    shapes: [] },
-                  { displayModeBar:false });
-                _chartReady = true;
-                maybeAddGridLines();
-                updateLastUpdated();
-              }catch(_){}
+            console.log('Chart initialized with tick data');
+          } catch (initError) {
+            console.error('Failed to initialize chart with tick data:', initError);
+            showChartError(`Failed to initialize chart: ${initError.message || 'Unknown error'}`);
+            return;
+          }
+        } else {
+          // Try to extend existing chart
+          try {
+            Plotly.extendTraces('chart', {x:[[t]], y:[[j.p]]}, [0], 10000);
+          } catch (extendError) {
+            console.warn('Failed to extend traces, recreating chart:', extendError);
+            
+            // Fallback: recreate chart with new data point
+            try{
+              const levels = buildAllLevels();
+              const yTicksVals = levels;
+              const yTicksText = levels.map(v => Number(v).toFixed(6));
+              
+              await Plotly.newPlot('chart',
+                [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
+                { margin:{l:50,r:20,t:10,b:40},
+                  xaxis:{ title:'Time', showgrid:false, tickformat:"%d/%m", hoverformat:"%d/%m/%Y %H:%M:%S" },
+                  yaxis:{ title:'Price (USDT)', showgrid:false,
+                          tickmode: (yTicksVals.length? 'array':'auto'),
+                          tickvals: (yTicksVals.length? yTicksVals: undefined),
+                          ticktext: (yTicksVals.length? yTicksText: undefined),
+                          hoverformat: ".6f" },
+                  paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+                  shapes: [] },
+                { displayModeBar:false });
+              _chartReady = true;
+              maybeAddGridLines();
+              updateLastUpdated();
+              console.log('Chart recreated successfully');
+            }catch(recreateError){
+              console.error('Failed to recreate chart:', recreateError);
+              showChartError(`Chart update failed: ${recreateError.message || 'Unknown error'}`);
+              return;
             }
           }
-
-          // עדכן הדגשת שכבות סביב המחיר הנוכחי
-          maybeAddGridLines();
-          updateLastUpdated();
         }
-      }catch(e){}
+
+        // עדכן הדגשת שכבות סביב המחיר הנוכחי
+        maybeAddGridLines();
+        updateLastUpdated();
+        
+      }catch(e){
+        console.error('Error processing tick event:', e);
+      }
     });
 
     // live stats events (after file change)
