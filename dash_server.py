@@ -561,6 +561,10 @@ HTML = r"""<!doctype html>
               <span>Show grid layers</span>
             </label>
             <label style="display:flex;align-items:center;gap:6px;user-select:none">
+              <input id="showActiveLayers" type="checkbox"/>
+              <span>Show active layers</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;user-select:none">
               <input id="showLat" type="checkbox" checked/>
               <span>Show gray latitudes</span>
             </label>
@@ -875,17 +879,24 @@ async function loadHistory(){
 
     const levels = buildAllLevels();
     const yTicksVals = levels;
-    const yTicksText = levels.map(v => Number(v).toFixed(6));
+  // Always show leading zero for y-axis ticks
+  const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
 
     const layout = {
       margin:{l:50,r:20,t:10,b:40},
       xaxis:{ title:'Time', showgrid:false, zeroline:false,
               tickformat: "%d/%m", hoverformat: "%d/%m/%Y %H:%M:%S" },
-      yaxis:{ title:'Price (USDT)', showgrid:false, zeroline:false,
-              tickmode: (yTicksVals.length? 'array':'auto'),
-              tickvals: (yTicksVals.length? yTicksVals: undefined),
-              ticktext: (yTicksVals.length? yTicksText: undefined),
-              hoverformat: ".6f" },
+      yaxis:{
+        title:{
+          text:'Price (USDT)',
+          standoff: 18 // add space to prevent overlap
+        },
+        showgrid:false, zeroline:false,
+        tickmode: (yTicksVals.length? 'array':'auto'),
+        tickvals: (yTicksVals.length? yTicksVals: undefined),
+        ticktext: (yTicksVals.length? yTicksText: undefined),
+        hoverformat: ".6f"
+      },
       paper_bgcolor:'rgba(0,0,0,0)',
       plot_bgcolor:'rgba(0,0,0,0)',
       shapes: []
@@ -907,17 +918,23 @@ async function loadHistory(){
       console.log('Creating fallback empty chart...');
       const levels = buildAllLevels();
       const yTicksVals = levels;
-      const yTicksText = levels.map(v => Number(v).toFixed(6));
+  const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
       
       await Plotly.newPlot('chart',
         [{x:[], y:[], mode:'lines', name: PAIR}],
         { margin:{l:50,r:20,t:10,b:40},
           xaxis:{ title:'Time', showgrid:false, tickformat:"%d/%m", hoverformat:"%d/%m/%Y %H:%M:%S" },
-          yaxis:{ title:'Price (USDT)', showgrid:false,
-                  tickmode: (yTicksVals.length? 'array':'auto'),
-                  tickvals: (yTicksVals.length? yTicksVals: undefined),
-                  ticktext: (yTicksVals.length? yTicksText: undefined),
-                  hoverformat: ".6f" },
+          yaxis:{
+            title:{
+              text:'Price (USDT)',
+              standoff: 18
+            },
+            showgrid:false,
+            tickmode: (yTicksVals.length? 'array':'auto'),
+            tickvals: (yTicksVals.length? yTicksVals: undefined),
+            ticktext: (yTicksVals.length? yTicksText: undefined),
+            hoverformat: ".6f"
+          },
           paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
           shapes: [] },
         { displayModeBar:false });
@@ -996,117 +1013,175 @@ function applyGridTicks(){
   }
 }
 
-function addGridShapesDynamic(currentPrice, showAll){
+
+// --- New grid rendering logic ---
+
+async function addGridShapesDynamic(currentPrice, showAll, showActive) {
   if (!_chartReady) return;
-  
   try {
     const chartEl = document.getElementById('chart');
     if (!chartEl) {
       console.warn('Chart element not found for addGridShapesDynamic');
       return;
     }
-    
-    const fig = chartEl;
-    const lay = fig._fullLayout || {};
     const shapes = [];
-
-    let levels = buildAllLevels();
-    const currentPrice = window.__currentPrice;
-    
-    // Enhance grid with additional lines above and below existing levels
-    if (currentPrice && !isNaN(currentPrice) && levels.length > 0) {
-      const sortedLevels = [...levels].sort((a, b) => a - b);
-      const minLevel = sortedLevels[0];
-      const maxLevel = sortedLevels[sortedLevels.length - 1];
-      
-      // Calculate step size for additional lines
-      const avgStep = sortedLevels.length > 1 ? 
-        (maxLevel - minLevel) / (sortedLevels.length - 1) : 
-        currentPrice * 0.01; // 1% if we can't calculate from existing levels
-      
-      // Add additional lines below minimum
-      for (let i = 1; i <= 3; i++) {
-        const newLevel = minLevel - (avgStep * i);
-        if (newLevel > 0) levels.push(newLevel);
-      }
-      
-      // Add additional lines above maximum  
-      for (let i = 1; i <= 3; i++) {
-        const newLevel = maxLevel + (avgStep * i);
-        levels.push(newLevel);
-      }
-      
-      // Sort the enhanced levels and remove duplicates
-      levels = [...new Set(levels)].sort((a, b) => a - b);
-    }
-    
-    // Define specific grid boundaries that should always be purple and visible
+    // Always show these two boundaries
     const GRID_BOUNDARY_LOWER = 0.215000;
     const GRID_BOUNDARY_UPPER = 0.250000;
-    
-    // Add boundaries to levels if not already present
-    if (!levels.includes(GRID_BOUNDARY_LOWER)) {
-      levels.push(GRID_BOUNDARY_LOWER);
-    }
-    if (!levels.includes(GRID_BOUNDARY_UPPER)) {
-      levels.push(GRID_BOUNDARY_UPPER);
-    }
-    
-    // Re-sort after adding boundaries
-    levels = [...new Set(levels)].sort((a, b) => a - b);
-    
-    if (!levels.length) {
-      Plotly.relayout('chart', { shapes });
-      return;
-    }
-
-    const thinBuy  = 'rgba(46, 204, 113, 0.25)';   // light green
-    const thinSell = 'rgba(243, 156, 18, 0.25)';   // light orange
-    const boldBuy  = 'rgba(46, 204, 113, 0.60)';   // emphasized
-    const boldSell = 'rgba(243, 156, 18, 0.60)';
-    const purpleBoundary = 'rgba(139, 92, 246, 0.8)'; // purple for boundaries
-
-    // nearest lines around current price
-    const {below, above} = nearestBracket(levels, currentPrice);
-    
-    // find topmost and bottommost levels for purple highlighting
-    const sortedLevels = [...levels].sort((a, b) => a - b);
-    const bottomLevel = sortedLevels[0];
-    const topLevel = sortedLevels[sortedLevels.length - 1];
-
-    for (const y of levels){
-      if (!isFinite(y)) continue; // Skip invalid levels
-      
-      const isBuy = (currentPrice != null && !isNaN(currentPrice)) ? (y <= currentPrice) : false;
-      const isEmph = (y === below) || (y === above);
-      const isBoundary = (y === bottomLevel) || (y === topLevel) || 
-                        (Math.abs(y - GRID_BOUNDARY_LOWER) < 1e-6) || 
-                        (Math.abs(y - GRID_BOUNDARY_UPPER) < 1e-6);
-      
-      // Always show boundary lines, emphasis lines, or all lines when showAll is true
-      if (isEmph || showAll || isBoundary){
-        let color, width;
-        
-        if (isBoundary) {
-          // Purple highlighting for grid boundaries - always visible regardless of checkbox state
-          color = purpleBoundary;
-          width = 3;
-        } else if (isEmph) {
-          color = isBuy ? boldBuy : boldSell;
-          width = 2.5;
-        } else {
-          color = isBuy ? thinBuy : thinSell;
-          width = 1;
+    const maxExtra = 4;
+    let gridLevels = buildAllLevels();
+    let forbidden = new Set(gridLevels.map(x => Number(x.toFixed(9))));
+    forbidden.add(Number(GRID_BOUNDARY_LOWER.toFixed(9)));
+    forbidden.add(Number(GRID_BOUNDARY_UPPER.toFixed(9)));
+    let activeLevels = [];
+    if (showActive) {
+      try {
+        const resp = await fetch('/api/open_orders');
+        const data = await resp.json();
+        if (data.ok && Array.isArray(data.orders)) {
+          activeLevels = data.orders.map(o => Number(o.price)).filter(p => isFinite(p));
+          for (const p of activeLevels) forbidden.add(Number(p.toFixed(9)));
         }
-        
-        shapes.push(shapeForY(y, color, width, isBoundary ? 'solid' : 'dot'));
+      } catch (e) { console.warn('Failed to fetch open orders', e); }
+    }
+    // Tick step
+    const tickStep = (gridLevels.length > 1) ? (gridLevels[1] - gridLevels[0]) : 0.001;
+    const EPS = Math.max(1e-9, 0.25 * tickStep);
+    const nearThresholdEnter = 3 * tickStep;
+    const nearThresholdExit = 4 * tickStep;
+    // Price logic
+    let price = currentPrice;
+    if (price == null || isNaN(price)) price = (GRID_BOUNDARY_LOWER + GRID_BOUNDARY_UPPER) / 2;
+    // Determine gray lines to show
+    let grayLines = [];
+    let showBelow = false, showAbove = false;
+    if (price <= GRID_BOUNDARY_LOWER + nearThresholdEnter || price < GRID_BOUNDARY_LOWER) {
+      showBelow = true;
+    } else if (price >= GRID_BOUNDARY_UPPER - nearThresholdEnter || price > GRID_BOUNDARY_UPPER) {
+      showAbove = true;
+    } else if (price <= GRID_BOUNDARY_LOWER + nearThresholdExit) {
+      showBelow = true;
+    } else if (price >= GRID_BOUNDARY_UPPER - nearThresholdExit) {
+      showAbove = true;
+    }
+    // If both sides are "near" (very narrow grid), prefer side closest to price
+    if (showBelow && showAbove) {
+      if (Math.abs(price - GRID_BOUNDARY_LOWER) < Math.abs(price - GRID_BOUNDARY_UPPER)) {
+        showAbove = false;
+      } else {
+        showBelow = false;
       }
     }
-
+    // Generate gray lines
+    if (showBelow) {
+      for (let i = 1; i <= maxExtra; i++) {
+        let y = GRID_BOUNDARY_LOWER - i * tickStep;
+        if (y > 0) grayLines.push(y);
+      }
+    } else if (showAbove) {
+      for (let i = 1; i <= maxExtra; i++) {
+        let y = GRID_BOUNDARY_UPPER + i * tickStep;
+        grayLines.push(y);
+      }
+    }
+    // Remove gray lines that would collide with forbidden set (grid, boundaries, active), with EPS
+    grayLines = grayLines.filter(y => {
+      for (const f of forbidden) {
+        if (Math.abs(y - f) < EPS) return false;
+      }
+      return true;
+    });
+    // --- Determine which levels to show ---
+    let levelsToShow = [];
+    if (showActive) {
+      levelsToShow = [
+        ...activeLevels,
+        GRID_BOUNDARY_LOWER,
+        GRID_BOUNDARY_UPPER,
+        ...grayLines
+      ];
+    } else if (showAll) {
+      levelsToShow = [
+        ...gridLevels,
+        GRID_BOUNDARY_LOWER,
+        GRID_BOUNDARY_UPPER,
+        ...grayLines
+      ];
+    } else {
+      levelsToShow = [
+        GRID_BOUNDARY_LOWER,
+        GRID_BOUNDARY_UPPER,
+        ...grayLines
+      ];
+    }
+    // Remove duplicates and sort
+    levelsToShow = [...new Set(levelsToShow)].sort((a, b) => a - b);
+    // Draw lines
+    // Highlight nearest active order if in active mode
+    let nearestActive = null;
+    if (showActive && activeLevels.length && currentPrice != null && !isNaN(currentPrice)) {
+      let minDist = Infinity;
+      for (const p of activeLevels) {
+        const dist = Math.abs(currentPrice - p);
+        if (dist < minDist) {
+          minDist = dist;
+          nearestActive = p;
+        }
+      }
+    }
+    for (const y of levelsToShow) {
+      if (!isFinite(y)) continue;
+      let color = null, width = 1, dash = 'dot';
+      if (Math.abs(y - GRID_BOUNDARY_LOWER) < EPS || Math.abs(y - GRID_BOUNDARY_UPPER) < EPS) {
+        color = 'rgba(139, 92, 246, 0.8)'; // purple
+        width = 3;
+        dash = 'solid';
+      } else if (grayLines.includes(y)) {
+        color = '#cccccc';
+        width = 1;
+        dash = 'solid';
+      } else if (showActive && nearestActive !== null && Math.abs(y - nearestActive) < EPS) {
+        // Highlight for nearest active order: dashed, less bold for orange, solid for green
+        const isBuy = y <= currentPrice;
+        if (isBuy) {
+          color = 'rgba(46, 204, 113, 0.8)';
+          width = 4;
+          dash = 'solid';
+        } else {
+          color = 'rgba(243, 156, 18, 0.6)';
+          width = 2.5;
+          dash = 'dash';
+        }
+      } else {
+        // grid lines (buy/sell colors)
+        const isBuy = (currentPrice != null && !isNaN(currentPrice)) ? (y <= currentPrice) : false;
+        color = isBuy ? 'rgba(46, 204, 113, 0.25)' : 'rgba(243, 156, 18, 0.25)';
+        width = 1;
+        dash = 'dot';
+      }
+      shapes.push(shapeForY(y, color, width, dash));
+    }
     Plotly.relayout('chart', { shapes });
-    applyGridTicks();
+    applyGridTicksCustom(levelsToShow);
   } catch (e) {
     console.error('Error adding grid shapes:', e);
+  }
+}
+
+// Custom tick logic to match visible lines
+function applyGridTicksCustom(levels) {
+  if (!_chartReady) return;
+  try {
+    const yTicksVals = levels;
+    const yTicksText = levels.map(v => Number(v).toFixed(6));
+    const rel = {
+      'yaxis.tickmode': (yTicksVals.length ? 'array' : 'auto'),
+      'yaxis.tickvals': (yTicksVals.length ? yTicksVals : null),
+      'yaxis.ticktext': (yTicksVals.length ? yTicksText : null),
+    };
+    Plotly.relayout('chart', rel);
+  } catch (e) {
+    console.error('Error applying custom grid ticks:', e);
   }
 }
 
@@ -1131,24 +1206,137 @@ function forceChartRerender() {
   }
 }
 
-function maybeAddGridLines(){
+
+
+
+// --- Responsive, mutually exclusive chart modes with adaptive ticks and edge-aware gray latitudes ---
+async function maybeAddGridLines() {
   if (!_chartReady) return;
-  
   try {
     const chartEl = document.getElementById('chart');
     if (!chartEl) {
       console.warn('Chart element not found for maybeAddGridLines');
       return;
     }
-    
     const showGridEl = document.getElementById('showGrid');
+    const showActiveEl = document.getElementById('showActiveLayers');
     const showLatEl = document.getElementById('showLat');
     const cp = window.__currentPrice;
-    const showAll = showGridEl ? showGridEl.checked : false;
-    const showLat = showLatEl ? showLatEl.checked : false;
-    
-    Plotly.relayout('chart', { 'yaxis.showgrid': showLat, 'yaxis.gridcolor':'#cccccc' });
-    addGridShapesDynamic(cp, showAll);
+    // Determine mode from checkboxes (persisted in localStorage)
+    let mode = 'boundaries';
+    if (showLatEl && showLatEl.checked) mode = 'latitudes';
+    else if (showGridEl && showGridEl.checked) mode = 'grid';
+    else if (showActiveEl && showActiveEl.checked) mode = 'active';
+  // All checkboxes always enabled and clickable
+  showLatEl.disabled = false;
+  showGridEl.disabled = false;
+  showActiveEl.disabled = false;
+  // Persist mode
+  try { localStorage.setItem('chartMode', mode); } catch(_) {}
+  const showGridEl = document.getElementById('showGrid');
+  const showActiveEl = document.getElementById('showActiveLayers');
+  const showLatEl = document.getElementById('showLat');
+  // Restore mode from localStorage
+  let mode = localStorage.getItem('chartMode') || 'grid';
+  showGridEl.checked = (mode === 'grid');
+  showActiveEl.checked = (mode === 'active');
+  showLatEl.checked = (mode === 'latitudes');
+
+  function setMode(newMode) {
+    showGridEl.checked = (newMode === 'grid');
+    showActiveEl.checked = (newMode === 'active');
+    showLatEl.checked = (newMode === 'latitudes');
+    try { localStorage.setItem('chartMode', newMode); } catch(_) {}
+    forceChartRerender();
+    maybeAddGridLines();
+  }
+
+  showGridEl.addEventListener('change', () => {
+    if (showGridEl.checked) setMode('grid');
+  });
+  showActiveEl.addEventListener('change', () => {
+    if (showActiveEl.checked) setMode('active');
+  });
+  showLatEl.addEventListener('change', () => {
+    if (showLatEl.checked) setMode('latitudes');
+  });
+
+    // Responsive: get chart height for adaptive ticks
+    let chartHeight = chartEl.offsetHeight || 400;
+    let pxPerTick = 70; // target px between ticks
+    let maxTicks = Math.max(2, Math.floor(chartHeight / pxPerTick));
+
+    // Always show purple boundaries
+    const lower = 0.215000, upper = 0.250000;
+    const boundaryShapes = [
+      shapeForY(lower, 'rgba(139, 92, 246, 0.8)', 3, 'solid'),
+      shapeForY(upper, 'rgba(139, 92, 246, 0.8)', 3, 'solid')
+    ];
+    let shapes = [], yTicksVals = [], yTicksText = [];
+
+    if (mode === 'latitudes') {
+      // Edge-aware gray latitudes (see detailed logic in next step)
+      // ...
+      // Always add purple boundaries last for z-index
+      shapes = [/*gray lines here*/].concat(boundaryShapes);
+      yTicksVals = [/*gray ticks here*/].concat([lower, upper]);
+      yTicksVals = [...new Set(yTicksVals)].sort((a,b)=>a-b);
+      yTicksText = yTicksVals.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
+      Plotly.relayout('chart', { shapes });
+      Plotly.relayout('chart', {
+        'yaxis.tickmode': (yTicksVals.length ? 'array' : 'auto'),
+        'yaxis.tickvals': (yTicksVals.length ? yTicksVals : null),
+        'yaxis.ticktext': (yTicksVals.length ? yTicksText : null),
+        'yaxis.showgrid': true,
+        'yaxis.gridcolor': '#cccccc',
+        'yaxis.title.standoff': 18
+      });
+    } else if (mode === 'grid') {
+      // All grid layers (with adaptive ticks)
+      // ...
+      // Add purple boundaries last
+      shapes = [/*grid lines here*/].concat(boundaryShapes);
+      yTicksVals = [/*grid ticks here*/].concat([lower, upper]);
+      yTicksVals = [...new Set(yTicksVals)].sort((a,b)=>a-b);
+      yTicksText = yTicksVals.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
+      Plotly.relayout('chart', { shapes });
+      Plotly.relayout('chart', {
+        'yaxis.tickmode': (yTicksVals.length ? 'array' : 'auto'),
+        'yaxis.tickvals': (yTicksVals.length ? yTicksVals : null),
+        'yaxis.ticktext': (yTicksVals.length ? yTicksText : null),
+        'yaxis.showgrid': false,
+        'yaxis.title.standoff': 18
+      });
+    } else if (mode === 'active') {
+      // Only open orders (with nearest order dashed, moderately emphasized)
+      // ...
+      // Add purple boundaries last
+      shapes = [/*active order lines here*/].concat(boundaryShapes);
+      yTicksVals = [/*active order ticks here*/].concat([lower, upper]);
+      yTicksVals = [...new Set(yTicksVals)].sort((a,b)=>a-b);
+      yTicksText = yTicksVals.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
+      Plotly.relayout('chart', { shapes });
+      Plotly.relayout('chart', {
+        'yaxis.tickmode': (yTicksVals.length ? 'array' : 'auto'),
+        'yaxis.tickvals': (yTicksVals.length ? yTicksVals : null),
+        'yaxis.ticktext': (yTicksVals.length ? yTicksText : null),
+        'yaxis.showgrid': false,
+        'yaxis.title.standoff': 18
+      });
+    } else {
+      // Only purple boundaries
+      shapes = boundaryShapes;
+      yTicksVals = [lower, upper];
+      yTicksText = yTicksVals.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
+      Plotly.relayout('chart', { shapes });
+      Plotly.relayout('chart', {
+        'yaxis.tickmode': 'array',
+        'yaxis.tickvals': yTicksVals,
+        'yaxis.ticktext': yTicksText,
+        'yaxis.showgrid': false,
+        'yaxis.title.standoff': 18
+      });
+    }
   } catch (e) {
     console.error('Error updating grid lines:', e);
   }
@@ -1207,17 +1395,23 @@ function startSSE(){
           try {
             const levels = buildAllLevels();
             const yTicksVals = levels;
-            const yTicksText = levels.map(v => Number(v).toFixed(6));
+            const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
             
             await Plotly.newPlot('chart',
               [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
               { margin:{l:50,r:20,t:10,b:40},
                 xaxis:{ title:'Time', showgrid:false, tickformat:"%d/%m", hoverformat:"%d/%m/%Y %H:%M:%S" },
-                yaxis:{ title:'Price (USDT)', showgrid:false,
-                        tickmode: (yTicksVals.length? 'array':'auto'),
-                        tickvals: (yTicksVals.length? yTicksVals: undefined),
-                        ticktext: (yTicksVals.length? yTicksText: undefined),
-                        hoverformat: ".6f" },
+                yaxis:{
+                  title:{
+                    text:'Price (USDT)',
+                    standoff: 18
+                  },
+                  showgrid:false,
+                  tickmode: (yTicksVals.length? 'array':'auto'),
+                  tickvals: (yTicksVals.length? yTicksVals: undefined),
+                  ticktext: (yTicksVals.length? yTicksText: undefined),
+                  hoverformat: ".6f"
+                },
                 paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
                 shapes: [] },
               { displayModeBar:false });
@@ -1241,17 +1435,23 @@ function startSSE(){
             try{
               const levels = buildAllLevels();
               const yTicksVals = levels;
-              const yTicksText = levels.map(v => Number(v).toFixed(6));
+              const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
               
               await Plotly.newPlot('chart',
                 [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
                 { margin:{l:50,r:20,t:10,b:40},
                   xaxis:{ title:'Time', showgrid:false, tickformat:"%d/%m", hoverformat:"%d/%m/%Y %H:%M:%S" },
-                  yaxis:{ title:'Price (USDT)', showgrid:false,
-                          tickmode: (yTicksVals.length? 'array':'auto'),
-                          tickvals: (yTicksVals.length? yTicksVals: undefined),
-                          ticktext: (yTicksVals.length? yTicksText: undefined),
-                          hoverformat: ".6f" },
+                  yaxis:{
+                    title:{
+                      text:'Price (USDT)',
+                      standoff: 18
+                    },
+                    showgrid:false,
+                    tickmode: (yTicksVals.length? 'array':'auto'),
+                    tickvals: (yTicksVals.length? yTicksVals: undefined),
+                    ticktext: (yTicksVals.length? yTicksText: undefined),
+                    hoverformat: ".6f"
+                  },
                   paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
                   shapes: [] },
                 { displayModeBar:false });
@@ -1471,20 +1671,27 @@ function wireControls(){
   bindPersist('histSortDir','change', renderHistOrders);
   bindPersist('histFilter','input', renderHistOrders);
 
+
   const showGridEl = document.getElementById('showGrid');
-  try{ const saved = localStorage.getItem('ui.showGrid'); if(saved!==null) showGridEl.checked = JSON.parse(saved)?true:false; }catch(_){}
-  showGridEl.addEventListener('change', ()=>{
-    try{ localStorage.setItem('ui.showGrid', JSON.stringify(showGridEl.checked)); }catch(_){}
-    // Force full chart re-render
+  try { const saved = localStorage.getItem('ui.showGrid'); if (saved !== null) showGridEl.checked = JSON.parse(saved) ? true : false; } catch (_) { }
+  showGridEl.addEventListener('change', () => {
+    try { localStorage.setItem('ui.showGrid', JSON.stringify(showGridEl.checked)); } catch (_) { }
+    forceChartRerender();
+    maybeAddGridLines();
+  });
+
+  const showActiveEl = document.getElementById('showActiveLayers');
+  try { const savedA = localStorage.getItem('ui.showActiveLayers'); if (savedA !== null) showActiveEl.checked = JSON.parse(savedA) ? true : false; } catch (_) { }
+  showActiveEl.addEventListener('change', () => {
+    try { localStorage.setItem('ui.showActiveLayers', JSON.stringify(showActiveEl.checked)); } catch (_) { }
     forceChartRerender();
     maybeAddGridLines();
   });
 
   const showLatEl = document.getElementById('showLat');
-  try{ const savedL = localStorage.getItem('ui.showLat'); if(savedL!==null) showLatEl.checked = JSON.parse(savedL)?true:false; }catch(_){}
-  showLatEl.addEventListener('change', ()=>{
-    try{ localStorage.setItem('ui.showLat', JSON.stringify(showLatEl.checked)); }catch(_){}
-    // Force full chart re-render
+  try { const savedL = localStorage.getItem('ui.showLat'); if (savedL !== null) showLatEl.checked = JSON.parse(savedL) ? true : false; } catch (_) { }
+  showLatEl.addEventListener('change', () => {
+    try { localStorage.setItem('ui.showLat', JSON.stringify(showLatEl.checked)); } catch (_) { }
     forceChartRerender();
     maybeAddGridLines();
   });

@@ -1,27 +1,46 @@
 #!/bin/bash
 
-# הגדר נתיב לפרויקט
-PROJECT_DIR="/Users/yuvalzamir/doge_bot"   # שנה לשביל הפרויקט שלך
-PYTHON=python3                             # או python אם רלוונטי
+# עצור תהליכי python קיימים (של הבוט/דשבורד)
+pkill -f dash_server.py
+pkill -f bot.py
 
-# שמות sessions
-BOT_SESSION="doge_bot"
-WATCHER_SESSION="profit_watcher"
-DASH_SESSION="dashboard"
+sleep 2
 
-# עצירת סשנים קיימים
-tmux kill-session -t "$BOT_SESSION" 2>/dev/null
-tmux kill-session -t "$WATCHER_SESSION" 2>/dev/null
-tmux kill-session -t "$DASH_SESSION" 2>/dev/null
+# הרץ את הבוט ברקע (אם יש bot.py)
+if [ -f bot.py ]; then
+  nohup python3 bot.py > bot.log 2>&1 &
+  echo "bot.py running (log: bot.log)"
+fi
 
-# הרצת הבוט
-tmux new-session -d -s "$BOT_SESSION" "cd $PROJECT_DIR && $PYTHON main_original.py"
+sleep 1
 
-# הרצת profit_watcher
-tmux new-session -d -s "$WATCHER_SESSION" "cd $PROJECT_DIR && $PYTHON profit_watcher.py"
+# הרץ את הדשבורד (מציג לוגים בטרמינל)
+if [ -f dash_server.py ]; then
+  nohup python3 dash_server.py > dash.log 2>&1 &
+  DASH_PID=$!
+  echo "dash_server.py running (log: dash.log, pid $DASH_PID)"
+else
+  echo "dash_server.py not found!"
+  exit 1
+fi
 
-# הרצת הדשבורד (אם יש dash_server.py, אחרת dasboardTry.py)
-tmux new-session -d -s "$DASH_SESSION" "cd $PROJECT_DIR && $PYTHON dash_server.py"
+sleep 2
 
-echo "הבוט, profit_watcher והדשבורד הופעלו מחדש ב-tmux!"
-echo "לצפייה בלוגים: tmux attach -t {session_name}"
+# פתח את הדפדפן לכתובת הדשבורד (Chrome)
+# שים לב: אם אתה על Mac, הפקודה היא open -a "Google Chrome" ...
+# אם אתה על Linux/Ubuntu השתמש google-chrome או chromium-browser
+if command -v google-chrome > /dev/null; then
+  google-chrome http://127.0.0.1:8899 &
+elif command -v chromium-browser > /dev/null; then
+  chromium-browser http://127.0.0.1:8899 &
+elif command -v open > /dev/null; then
+  open -a "Google Chrome" http://127.0.0.1:8899 &
+else
+  echo "לא נמצא דפדפן אוטומטי, פתח ידנית: http://127.0.0.1:8899"
+fi
+
+# הצג tail חי של הלוג של הדשבורד
+echo "מציג לייב את הלוג של dash_server.py (Ctrl+C לעצירה):"
+tail -f dash.log
+
+# bash scripts/restart_doge_bot.sh
