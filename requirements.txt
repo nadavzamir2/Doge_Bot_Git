@@ -1,0 +1,17 @@
+# DOGE Trading Bot Dependencies
+# Core trading and exchange connectivity
+ccxt>=4.0.0
+
+# Web framework for dashboard
+flask>=2.3.0
+waitress>=2.1.0
+
+# Environment and configuration
+python-dotenv>=1.0.0
+
+# Data handling and utilities
+requests>=2.31.0
+
+# Optional: Enhanced development dependencies
+# pytest>=7.0.0  # Uncomment for testing
+# black>=23.0.0  # Uncomment for code formatting
