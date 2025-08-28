@@ -30,6 +30,14 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Dict
 
+# Import utils_stats for tracking actual splits
+try:
+    from utils_stats import add_actual_splits
+except ImportError:
+    # Graceful fallback if utils_stats is not available
+    def add_actual_splits(inc_actual_splits: int) -> dict:
+        return {}
+
 
 # Configuration constants
 SPLIT_CHUNK_USD = float(os.getenv("SPLIT_CHUNK_USD", "4.0"))
@@ -249,6 +257,13 @@ def handle_realized_profit(profit_usd: float, exchange_client) -> Dict[str, Any]
         result["chunks"] = complete_chunks
         result["reinvest_added_usd"] = total_to_reinvest
 
+        # Track actual splits in statistics
+        try:
+            add_actual_splits(complete_chunks)
+        except Exception as e:
+            # Don't fail the whole operation if stats update fails
+            print(f"[WARN] Failed to update actual_splits_count: {e}")
+
         state.last_action = (
             f"chunked: +{complete_chunks} chunks "
             f"(bnb+={total_to_bnb:.2f}, reinv+={total_to_reinvest:.2f})"
@@ -334,6 +349,30 @@ def get_current_state() -> Dict[str, Any]:
         Dict[str, Any]: Current state data
     """
     return asdict(_load_state())
+
+
+def handle_profit(profit_usd: float, exchange_client) -> Dict[str, Any]:
+    """
+    Alias for handle_realized_profit for backward compatibility.
+    
+    Args:
+        profit_usd: Profit amount in USD to process
+        exchange_client: CCXT exchange client for BNB purchases
+        
+    Returns:
+        Dict[str, Any]: Processing results from handle_realized_profit
+    """
+    return handle_realized_profit(profit_usd, exchange_client)
+
+
+def read_state() -> Dict[str, Any]:
+    """
+    Alias for get_current_state for backward compatibility.
+    
+    Returns:
+        Dict[str, Any]: Current state data
+    """
+    return get_current_state()
 
 
 def main() -> None:

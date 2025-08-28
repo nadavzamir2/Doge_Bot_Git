@@ -283,7 +283,9 @@ def api_stats():
     return {
         "price": _current_price,
         "profit_usd": float(stats.get("total_profit_usd", stats.get("cumulative_profit_usd", 0.0)) or 0.0),
-        "splits_count": int(stats.get("splits_count", 0) or 0),
+        "sell_trades_count": int(stats.get("sell_trades_count", stats.get("splits_count", 0)) or 0),  # Backward compatibility
+        "actual_splits_count": int(stats.get("actual_splits_count", 0) or 0),
+        "splits_count": int(stats.get("sell_trades_count", stats.get("splits_count", 0)) or 0),  # Legacy field for compatibility
         "bnb_converted_usd": float(stats.get("bnb_converted_usd", 0.0) or 0.0),
 
         "realized_profit_usd": float(stats.get("realized_profit_usd", 0.0) or 0.0),
@@ -541,7 +543,8 @@ HTML = r"""<!doctype html>
         <div class="subnote" id="profitTriggerNote">(0.00 / 0.00)</div>
       </div>
 
-      <div class="card"><h3>Splits Count</h3><div id="splitsVal" class="v mono">0</div></div>
+      <div class="card"><h3>Sell Trades Count</h3><div id="sellTradesVal" class="v mono">0</div></div>
+      <div class="card"><h3>Actual Splits Count</h3><div id="actualSplitsVal" class="v mono">0</div></div>
       <div class="card"><h3>Converted to BNB (USD)</h3><div id="bnbVal" class="v mono">0.00</div></div>
     </div>
 
@@ -840,12 +843,12 @@ function setText(id, val, digits=2){
   }
 }
 
-function updateProfitWithTrigger(profit, splitsCount){
+function updateProfitWithTrigger(profit, actualSplitsCount){
   const el = document.getElementById('profitTriggerNote');
   if (!el) return;
   const p = (profit==null || isNaN(profit)) ? 0 : Number(profit);
-  const s = (splitsCount==null || isNaN(splitsCount)) ? 0 : Math.round(Number(splitsCount));
-  el.textContent = `(${p.toFixed(2)} / ${s})`;
+  const s = (actualSplitsCount==null || isNaN(actualSplitsCount)) ? 0 : Math.round(Number(actualSplitsCount));
+  el.textContent = `(${p.toFixed(2)} / ${s} actual splits)`;
 }
 
 /* ===== stats (polling fallback) ===== */
@@ -855,7 +858,8 @@ async function loadStats(){
     const j = await r.json();
     if('price' in j) document.getElementById('priceVal').textContent = fmt(j.price, 6);
     document.getElementById('profitVal').textContent = fmt2(j.profit_usd);
-    document.getElementById('splitsVal').textContent = fmt0(j.splits_count);
+    document.getElementById('sellTradesVal').textContent = fmt0(j.sell_trades_count);
+    document.getElementById('actualSplitsVal').textContent = fmt0(j.actual_splits_count);
     document.getElementById('bnbVal').textContent = fmt2(j.bnb_converted_usd);
 
     // EXTRA profits
@@ -865,7 +869,7 @@ async function loadStats(){
     setText('feesVal', j.fees_usd ?? 0, 2);
     setText('profitPctVal', j.profit_pct ?? 0, 2);
 
-    updateProfitWithTrigger(j.profit_usd ?? 0, j.splits_count ?? 0);
+    updateProfitWithTrigger(j.profit_usd ?? 0, j.actual_splits_count ?? 0);
     updateLastUpdated();
   }catch(e){}
 }
@@ -1268,15 +1272,16 @@ function startSSE(){
         const s = JSON.parse(ev.data);
         // עדכון כרטיסי רווח
         setText('profitVal', s.profit_usd ?? 0, 2);
-        setText('splitsVal', s.splits_count ?? 0, 0);
+        setText('sellTradesVal', s.sell_trades_count ?? 0, 0);
+        setText('actualSplitsVal', s.actual_splits_count ?? 0, 0);
         setText('profitRealizedVal', s.realized_profit_usd ?? 0, 2);
         setText('profitUnrealizedVal', s.unrealized_profit_usd ?? 0, 2);
         setText('profitGridVal', s.grid_profit_usd ?? 0, 2);
         setText('feesVal', s.fees_usd ?? 0, 2);
         setText('profitPctVal', s.profit_pct ?? 0, 2);
 
-        const splitsCount = (s.splits_count!=null) ? s.splits_count : 0;
-        updateProfitWithTrigger(s.profit_usd ?? 0, splitsCount);
+        const actualSplitsCount = (s.actual_splits_count!=null) ? s.actual_splits_count : 0;
+        updateProfitWithTrigger(s.profit_usd ?? 0, actualSplitsCount);
         updateLastUpdated();
       }catch(e){}
     });

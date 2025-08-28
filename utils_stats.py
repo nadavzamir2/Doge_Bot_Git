@@ -62,7 +62,8 @@ def _defaults() -> dict:
         "schema_version": SCHEMA_VERSION,
         "cumulative_profit_usd": 0.0,
         "bnb_converted_usd": 0.0,
-        "splits_count": 0,
+        "sell_trades_count": 0,  # Renamed from splits_count for clarity
+        "actual_splits_count": 0,  # New field for actual profit chunks processed
         "trade_count": 0,
         "trigger_amount_usd": DEFAULT_TRIGGER,
         "last_update_ts": now,
@@ -96,18 +97,37 @@ def write_stats(d: dict) -> None:
 # עדכונים פומביים
 # --------------------------
 
-def add_realized_profit(delta_usd: float, inc_splits: int = 0, inc_trades: int = 0) -> dict:
+def add_realized_profit(delta_usd: float, inc_sell_trades: int = 0, inc_trades: int = 0) -> dict:
     """
-    מוסיף רווח/הפסד ממומש; מגדיל מונה ספליטים/טריידים (אם נמסרו).
+    מוסיף רווח/הפסד ממומש; מגדיל מונה של טריידי מכירה/טריידים כלליים (אם נמסרו).
     מחזיר מצב מעודכן (dict).
+    
+    Args:
+        delta_usd: Profit/loss amount to add
+        inc_sell_trades: Number of sell trades that matched inventory to add
+        inc_trades: Number of general trades to add
     """
     st = read_stats()
     if delta_usd:
         st["cumulative_profit_usd"] = float(st.get("cumulative_profit_usd", 0.0) + float(delta_usd))
-    if inc_splits:
-        st["splits_count"] = int(st.get("splits_count", 0)) + int(inc_splits)
+    if inc_sell_trades:
+        st["sell_trades_count"] = int(st.get("sell_trades_count", 0)) + int(inc_sell_trades)
     if inc_trades:
         st["trade_count"] = int(st.get("trade_count", 0)) + int(inc_trades)
+    write_stats(st)
+    return st
+
+def add_actual_splits(inc_actual_splits: int) -> dict:
+    """
+    מגדיל מונה של ספליטים ממשיים (chunks מעובדים ב-profit_split.py).
+    מחזיר מצב מעודכן (dict).
+    
+    Args:
+        inc_actual_splits: Number of actual profit chunks processed to add
+    """
+    st = read_stats()
+    if inc_actual_splits:
+        st["actual_splits_count"] = int(st.get("actual_splits_count", 0)) + int(inc_actual_splits)
     write_stats(st)
     return st
 

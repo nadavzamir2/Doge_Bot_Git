@@ -29,7 +29,8 @@ DATA_DIR = pathlib.Path.home() / "doge_bot" / "data"
 REQUIRED_STATS_KEYS = [
     "cumulative_profit_usd",
     "bnb_converted_usd",
-    "splits_count",
+    "sell_trades_count",  # Renamed from splits_count for clarity
+    "actual_splits_count",  # New field for actual profit chunks
     "trade_count",
     "trigger_amount_usd",
 ]
@@ -86,13 +87,14 @@ def validate_runtime_stats() -> None:
             print(f"[WARN] runtime_stats.json missing key: {key}")
     else:
         profit = stats_data["cumulative_profit_usd"]
-        splits = stats_data["splits_count"]
+        sell_trades = stats_data["sell_trades_count"]
+        actual_splits = stats_data["actual_splits_count"]
         bnb = stats_data["bnb_converted_usd"]
         trades = stats_data["trade_count"]
 
         print(
-            f"[OK] runtime_stats.json: profit={profit:.4f} splits={splits} "
-            f"bnb=${bnb:.2f} trades={trades}"
+            f"[OK] runtime_stats.json: profit={profit:.4f} sell_trades={sell_trades} "
+            f"actual_splits={actual_splits} bnb=${bnb:.2f} trades={trades}"
         )
 
 
