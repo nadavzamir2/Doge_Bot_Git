@@ -190,7 +190,7 @@ def process_trades_sequence(trades: List[Dict[str, Any]], st: Dict[str, Any],
                             fee_rate_each_side: float) -> Tuple[float, int, Optional[str]]:
     inv = st.get("inventory", [])
     realized_total = 0.0
-    inc_splits = 0
+    inc_sell_trades = 0  # Renamed from inc_splits for clarity - this counts sell trades, not actual profit splits
     last_id = st.get("last_trade_id")
 
     for t in trades:
@@ -208,12 +208,12 @@ def process_trades_sequence(trades: List[Dict[str, Any]], st: Dict[str, Any],
             pnl, matched = fifo_match_sell(inv, price, amount, fee_rate_each_side)
             realized_total += pnl
             if matched > 0:
-                inc_splits += 1
+                inc_sell_trades += 1  # Count sell trades that matched inventory
 
         last_id = tid
 
     st["inventory"] = inv
-    return realized_total, inc_splits, last_id
+    return realized_total, inc_sell_trades, last_id
 
 
 # === עזר: סנכרון מוחלט של bnb_converted_usd מה-profit_split ===
@@ -235,13 +235,13 @@ def do_backfill(st: Dict[str, Any], since_ms: int) -> Dict[str, Any]:
         print("[BACKFILL] no trades returned for backfill window.")
         return st
 
-    realized, splits, last_id = process_trades_sequence(trades, st, FEE_RATE_EACH_SIDE)
-    print(f"[BACKFILL] processed {len(trades)} trades | realized={realized:.6f} | splits={splits}")
+    realized, sell_trades, last_id = process_trades_sequence(trades, st, FEE_RATE_EACH_SIDE)
+    print(f"[BACKFILL] processed {len(trades)} trades | realized={realized:.6f} | sell_trades={sell_trades}")
 
     # === עדכוני סטטוס + חלוקה ===
-    if abs(realized) > 1e-12 or splits > 0:
+    if abs(realized) > 1e-12 or sell_trades > 0:
         # עדכון dashboard (מצטבר/ספירה)
-        add_realized_profit(realized, inc_splits=splits)
+        add_realized_profit(realized, inc_sell_trades=sell_trades)
         # עדכון מנגנון חלוקה (state.json + קניית BNB אם צריך)
         if realized > 0:
             try:
@@ -289,13 +289,13 @@ def live_tail_loop(st: Dict[str, Any], interval_sec: int):
                 time.sleep(interval_sec)
                 continue
 
-            realized, splits, new_last_id = process_trades_sequence(new_trades, st, FEE_RATE_EACH_SIDE)
-            print(f"[LIVE] processed {len(new_trades)} new trades | realized={realized:.6f} | splits={splits}")
+            realized, sell_trades, new_last_id = process_trades_sequence(new_trades, st, FEE_RATE_EACH_SIDE)
+            print(f"[LIVE] processed {len(new_trades)} new trades | realized={realized:.6f} | sell_trades={sell_trades}")
 
             # === עדכוני סטטוס + חלוקה ===
-            if abs(realized) > 1e-12 or splits > 0:
+            if abs(realized) > 1e-12 or sell_trades > 0:
                 # עדכון dashboard (מצטבר/ספירה)
-                add_realized_profit(realized, inc_splits=splits)
+                add_realized_profit(realized, inc_sell_trades=sell_trades)
                 # עדכון מנגנון חלוקה (state.json + קניית BNB אם צריך)
                 if realized > 0:
                     try:
