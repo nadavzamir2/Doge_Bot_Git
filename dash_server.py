@@ -295,17 +295,20 @@ def api_initial_investments():
         ]
         
         initial_doge = 0.0
+        total_doge_usdt_value = 0.0  # USDT value at time of investment
         
         for state_file in state_paths:
             if state_file.exists():
                 try:
                     with open(state_file, 'r') as f:
                         state = json.load(f)
-                        # Calculate total DOGE from buy fills
+                        # Calculate total DOGE from buy fills and their USDT value
                         buy_fills = state.get("buy_fills", {})
                         for fill in buy_fills.values():
                             amount = float(fill.get("amount", 0))
+                            price = float(fill.get("price", 0))
                             initial_doge += amount
+                            total_doge_usdt_value += amount * price
                     break  # Found and processed the file
                 except Exception as e:
                     print(f"[WARN] Failed to read {state_file}: {e}")
@@ -314,11 +317,13 @@ def api_initial_investments():
         return {
             "initial_usdt": float(MAX_USD_FOR_CYCLE or 0.0),
             "initial_doge": float(initial_doge),
+            "initial_doge_usdt_value": float(total_doge_usdt_value),
         }
     except Exception as e:
         return {
             "initial_usdt": float(MAX_USD_FOR_CYCLE or 0.0),
             "initial_doge": 0.0,
+            "initial_doge_usdt_value": 0.0,
             "error": str(e)
         }
 
@@ -521,9 +526,57 @@ HTML = r"""<!doctype html>
     pointer-events: none;
   }
   .cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap:12px; margin-bottom:16px; }
-  .card { background:var(--card); border:1px solid var(--grid); border-radius:12px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+  .card { background:var(--card); border:1px solid var(--grid); border-radius:12px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,.04); position: relative; }
   .card h3 { margin:0 0 6px; font-size:13px; color:var(--muted); font-weight:600; }
   .card .v { font-size:20px; font-weight:700; }
+  
+  /* Tooltip styles for info boxes */
+  .card[data-tooltip]:hover::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 1000;
+    pointer-events: none;
+    margin-bottom: 5px;
+  }
+  
+  .card[data-tooltip]:hover::before {
+    content: '';
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: rgba(0, 0, 0, 0.8);
+    z-index: 1000;
+    pointer-events: none;
+  }
+  
+  /* Loading indicator styles */
+  .loading-indicator {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--muted);
+    border-radius: 50%;
+    border-top-color: var(--primary, #007bff);
+    animation: spin 1s ease-in-out infinite;
+    margin-left: 8px;
+  }
+  
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  
+  .hidden { display: none; }
   .subnote { font-size:12px; color:var(--muted); margin-top:4px; }
   .sections { display:grid; gap:12px; }
   details { background:var(--card); border:1px solid var(--grid); border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
@@ -575,12 +628,12 @@ HTML = r"""<!doctype html>
     <!-- Top info cards -->
     <div class="cards">
       <!-- New info boxes for initial investments -->
-      <div class="card">
+      <div class="card" data-tooltip="Total USDT amount initially invested in the trading bot">
         <h3>Initial USDT Invested</h3>
         <div id="initialUsdtVal" class="v mono">—</div>
       </div>
 
-      <div class="card">
+      <div class="card" data-tooltip="Total DOGE amount initially invested and its equivalent USDT value at time of investment">
         <h3>Initial DOGE Invested</h3>
         <div id="initialDogeVal" class="v mono">—</div>
       </div>
@@ -959,20 +1012,62 @@ async function loadStats(){
 
 /* ===== Load initial investments ===== */
 async function loadInitialInvestments(){
+  const usdtEl = document.getElementById('initialUsdtVal');
+  const dogeEl = document.getElementById('initialDogeVal');
+  
+  // Show loading indicators after 2 seconds if data hasn't loaded yet
+  let loadingTimeout = setTimeout(() => {
+    if (usdtEl && usdtEl.textContent === '—') {
+      usdtEl.innerHTML = '— <span class="loading-indicator"></span>';
+    }
+    if (dogeEl && dogeEl.textContent === '—') {
+      dogeEl.innerHTML = '— <span class="loading-indicator"></span>';
+    }
+  }, 2000);
+  
   try{
     const r = await fetch('/api/initial_investments');
     const j = await r.json();
     
-    const usdtEl = document.getElementById('initialUsdtVal');
-    const dogeEl = document.getElementById('initialDogeVal');
+    // Clear loading timeout since we got data
+    clearTimeout(loadingTimeout);
     
     if (usdtEl) {
-      usdtEl.textContent = j.initial_usdt > 0 ? Number(j.initial_usdt).toFixed(2) : '—';
+      // Add $ symbol to USDT values
+      if (j.initial_usdt > 0) {
+        usdtEl.textContent = `$${Number(j.initial_usdt).toFixed(2)}`;
+      } else {
+        usdtEl.textContent = '—';
+      }
     }
+    
     if (dogeEl) {
-      dogeEl.textContent = j.initial_doge > 0 ? Number(j.initial_doge).toFixed(2) : '—';
+      if (j.initial_doge > 0) {
+        const dogeAmount = Number(j.initial_doge).toFixed(2);
+        
+        // Show USDT equivalent at time of investment if available
+        let usdtEquivalent = '';
+        if (j.initial_doge_usdt_value && j.initial_doge_usdt_value > 0) {
+          usdtEquivalent = `~$${j.initial_doge_usdt_value.toFixed(2)} at time of investment`;
+        }
+        
+        if (usdtEquivalent) {
+          dogeEl.innerHTML = `${dogeAmount} DOGE<div class="subnote">${usdtEquivalent}</div>`;
+        } else {
+          dogeEl.textContent = `${dogeAmount} DOGE`;
+        }
+      } else {
+        dogeEl.textContent = '—';
+      }
     }
   }catch(e){
+    // Clear loading timeout on error
+    clearTimeout(loadingTimeout);
+    
+    // Remove loading indicators and show error state
+    if (usdtEl) usdtEl.textContent = '—';
+    if (dogeEl) dogeEl.textContent = '—';
+    
     console.warn('Failed to load initial investments:', e);
   }
 }
@@ -1191,12 +1286,7 @@ async function updateChart() {
         // For grid mode, show exact grid tick numbers with consistent formatting
         const allLevels = buildAllLevels();
         yTicksText = yTicksVals.map(v => {
-            // Check if this is an original grid level and find its index
-            const gridIndex = allLevels.findIndex(level => Math.abs(level - v) < 1e-10);
-            if (gridIndex >= 0) {
-                // Show grid levels with tick number annotation
-                return `${fmt(v, 6)} [#${gridIndex + 1}]`;
-            }
+            // Just show the formatted value without [#] annotations
             return fmt(v, 6);
         });
     }
