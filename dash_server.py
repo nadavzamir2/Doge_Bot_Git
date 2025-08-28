@@ -334,15 +334,32 @@ def api_order_history():
             status = (o.get("status") or "").lower()
             if status not in ("closed", "filled", "canceled"):
                 continue
-            ts = o.get("timestamp") or o.get("datetime")
-            if isinstance(ts, (int, float)):
-                ts_iso = datetime.utcfromtimestamp(ts / 1000.0).isoformat() + "Z"
+            
+            # Placement timestamp (when order was created)
+            placement_ts = o.get("timestamp") or o.get("datetime")
+            if isinstance(placement_ts, (int, float)):
+                placement_ts_iso = datetime.utcfromtimestamp(placement_ts / 1000.0).isoformat() + "Z"
             else:
-                ts_iso = str(ts)
+                placement_ts_iso = str(placement_ts)
+            
+            # Execution timestamp (when order was filled)
+            # Try multiple fields: lastTradeTimestamp, info.updateTime, or fallback to placement time
+            execution_ts = o.get("lastTradeTimestamp")
+            if not execution_ts and o.get("info"):
+                execution_ts = o.get("info", {}).get("updateTime")
+            if not execution_ts:
+                execution_ts = placement_ts  # Fallback to placement time
+            
+            if isinstance(execution_ts, (int, float)):
+                execution_ts_iso = datetime.utcfromtimestamp(execution_ts / 1000.0).isoformat() + "Z"
+            else:
+                execution_ts_iso = str(execution_ts)
+            
             price = float(o.get("price") or o.get("average") or 0)
             amount = float(o.get("amount") or o.get("filled") or 0)
             out.append({
-                "time": ts_iso,
+                "time": placement_ts_iso,
+                "execution_time": execution_ts_iso,
                 "side": o.get("side"),
                 "price": price,
                 "amount": amount,
@@ -355,15 +372,21 @@ def api_order_history():
         try:
             trades = CLIENT.fetch_my_trades(PAIR, limit=50, params={"recvWindow": RECV_WINDOW})
             for t in trades:
-                ts = t.get("timestamp") or t.get("datetime")
-                if isinstance(ts, (int, float)):
-                    ts_iso = datetime.utcfromtimestamp(ts / 1000.0).isoformat() + "Z"
+                # For trades, timestamp is execution time, placement time is unknown
+                execution_ts = t.get("timestamp") or t.get("datetime")
+                if isinstance(execution_ts, (int, float)):
+                    execution_ts_iso = datetime.utcfromtimestamp(execution_ts / 1000.0).isoformat() + "Z"
                 else:
-                    ts_iso = str(ts)
+                    execution_ts_iso = str(execution_ts)
+                
+                # For trades, we don't have placement time, so mark as unavailable
+                placement_ts_iso = "—"  # Unavailable for trades
+                
                 price = float(t.get("price") or 0)
                 amount = float(t.get("amount") or 0)
                 out.append({
-                    "time": ts_iso,
+                    "time": placement_ts_iso,
+                    "execution_time": execution_ts_iso,
                     "side": t.get("side"),
                     "price": price,
                     "amount": amount,
@@ -1354,7 +1377,7 @@ function renderHistOrders(){
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${fmtDateTimeLocal(o.time)}</td>
-      <td>${fmtDateTimeLocal(o.time)}</td>
+      <td>${fmtDateTimeLocal(o.execution_time || o.time)}</td>
       <td><span class="pill ${o.side==='buy'?'buy':'sell'}">${o.side ?? '—'}</span></td>
       <td>${o.status ?? '—'}</td>
       <td class="mono">${fmt(o.price, 6)}</td>
