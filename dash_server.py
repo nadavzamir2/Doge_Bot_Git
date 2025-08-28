@@ -26,7 +26,7 @@ from collections import deque
 from datetime import datetime
 from typing import Optional
 
-from flask import Flask, Response, jsonify, request, render_template_string
+from flask import Flask, Response, jsonify, request, render_template_string, make_response
 from dotenv import load_dotenv
 import ccxt
 
@@ -643,6 +643,7 @@ HTML = r"""<!doctype html>
           <table id="histTbl">
             <thead><tr>
               <th>Time</th>
+              <th>Execution Time</th>
               <th>Side</th>
               <th>Status</th>
               <th class="mono">Price</th>
@@ -896,13 +897,16 @@ async function loadHistory(){
   const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
 
     const layout = {
-      margin:{l:50,r:20,t:10,b:40},
-      xaxis:{ title:'Time', showgrid:false, zeroline:false,
-              tickformat: "%d/%m", hoverformat: "%d/%m/%Y %H:%M:%S" },
+      margin:{l:90,r:20,t:10,b:50},
+      xaxis:{ 
+        title: { text: 'Time', standoff: 25 },
+        showgrid:false, zeroline:false,
+        tickformat: "%d/%m<br><i style='font-size:0.8em'>(%H:00)</i>", hoverformat: "%d/%m/%Y %H:%M:%S" 
+      },
       yaxis:{
         title:{
           text:'Price (USDT)',
-          standoff: 25 // add space to prevent overlap
+          standoff: 40 // add space to prevent overlap
         },
         showgrid:false, zeroline:false,
         tickmode: (yTicksVals.length? 'array':'auto'),
@@ -920,7 +924,7 @@ async function loadHistory(){
   console.log('Creating chart with', data[0].x.length, 'data points');
   await Plotly.react('chart', data, layout, {displayModeBar:false});
     _chartReady = true;
-    maybeAddGridLines();
+    updateChart();
     updateLastUpdated();
     console.log('Chart loaded successfully');
     
@@ -936,12 +940,15 @@ async function loadHistory(){
       
       await Plotly.newPlot('chart',
         [{x:[], y:[], mode:'lines', name: PAIR}],
-        { margin:{l:50,r:20,t:10,b:40},
-          xaxis:{ title:'Time', showgrid:false, tickformat:"%d/%m", hoverformat:"%d/%m/%Y %H:%M:%S" },
+        { margin:{l:80,r:20,t:10,b:50},
+          xaxis:{ 
+            title: { text: 'Time', standoff: 25 },
+            showgrid:false, tickformat:"%d/%m<br><i style='font-size:0.8em'>(%H:00)</i>", hoverformat:"%d/%m/%Y %H:%M:%S" 
+          },
           yaxis:{
             title:{
               text:'Price (USDT)',
-              standoff: 18
+              standoff: 40
             },
             showgrid:false,
             tickmode: (yTicksVals.length? 'array':'auto'),
@@ -953,7 +960,7 @@ async function loadHistory(){
           shapes: [] },
         { displayModeBar:false });
       _chartReady = true;
-      maybeAddGridLines();
+      updateChart();
       updateLastUpdated();
       console.log('Fallback empty chart created');
       
@@ -964,419 +971,102 @@ async function loadHistory(){
   }
 }
 
-/* ===== Grid layers (BUY=light green, SELL=light orange) dynamic emphasis ===== */
-function shapeForY(y, color, width, dash){
-  return {
-    type: 'line',
-    xref: 'paper', x0: 0, x1: 1,
-    yref: 'y', y0: y, y1: y,
-    line: { color, width, dash },
-  };
+/* ===== Chart Line and Tick Logic ===== */
+
+// Helper to create a line shape for Plotly
+function shapeForY(y, color, width, dash) {
+    return {
+        type: 'line', xref: 'paper', x0: 0, x1: 1,
+        yref: 'y', y0: y, y1: y,
+        line: { color, width, dash },
+    };
 }
 
-function applyGridTicks(){
-  if (!_chartReady) return;
-  
-  try {
+// Main function to update chart lines and ticks based on the selected mode
+async function updateChart() {
+    if (!_chartReady) return;
     const chartEl = document.getElementById('chart');
-    if (!chartEl) {
-      console.warn('Chart element not found for applyGridTicks');
-      return;
-    }
-    
-    let levels = buildAllLevels();
+    if (!chartEl || !chartEl.layout) return;
+
+    const mode = localStorage.getItem('chartMode') || 'grid';
     const currentPrice = window.__currentPrice;
-    
-    // Enhance grid with additional lines above and below existing levels
-    if (currentPrice && !isNaN(currentPrice) && levels.length > 0) {
-      const sortedLevels = [...levels].sort((a, b) => a - b);
-      const minLevel = sortedLevels[0];
-      const maxLevel = sortedLevels[sortedLevels.length - 1];
-      
-      // Calculate step size for additional lines
-      const avgStep = sortedLevels.length > 1 ? 
-        (maxLevel - minLevel) / (sortedLevels.length - 1) : 
-        currentPrice * 0.01; // 1% if we can't calculate from existing levels
-      
-      // Add additional lines below minimum
-      for (let i = 1; i <= 3; i++) {
-        const newLevel = minLevel - (avgStep * i);
-        if (newLevel > 0) levels.push(newLevel);
-      }
-      
-      // Add additional lines above maximum  
-      for (let i = 1; i <= 3; i++) {
-        const newLevel = maxLevel + (avgStep * i);
-        levels.push(newLevel);
-      }
-      
-      // Sort the enhanced levels
-      levels = [...new Set(levels)].sort((a, b) => a - b);
+
+    let shapes = [];
+    let yTicksVals = [];
+
+    // Always add purple boundary lines
+    if (GRID_MIN != null) {
+        shapes.push(shapeForY(GRID_MIN, 'rgba(139, 92, 246, 0.8)', 2, 'solid'));
+        yTicksVals.push(GRID_MIN);
     }
-    
-    const yTicksVals = levels;
-    const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
-    const rel = {
-      'yaxis.tickmode': (yTicksVals.length? 'array':'auto'),
-      'yaxis.tickvals': (yTicksVals.length? yTicksVals: null),
-      'yaxis.ticktext': (yTicksVals.length? yTicksText: null),
-    };
-    Plotly.relayout('chart', rel);
-  } catch (e) {
-    console.error('Error applying grid ticks:', e);
-  }
-}
-
-
-// --- New grid rendering logic ---
-
-async function addGridShapesDynamic(currentPrice, showAll, showActive) {
-  if (!_chartReady) return;
-  try {
-    const chartEl = document.getElementById('chart');
-    if (!chartEl) {
-      console.warn('Chart element not found for addGridShapesDynamic');
-      return;
+    if (GRID_MAX != null) {
+        shapes.push(shapeForY(GRID_MAX, 'rgba(139, 92, 246, 0.8)', 2, 'solid'));
+        yTicksVals.push(GRID_MAX);
     }
-    const shapes = [];
-    // Always show these two boundaries
-    const GRID_BOUNDARY_LOWER = 0.215000;
-    const GRID_BOUNDARY_UPPER = 0.250000;
-    const maxExtra = 4;
-    let gridLevels = buildAllLevels();
-    let forbidden = new Set(gridLevels.map(x => Number(x.toFixed(9))));
-    forbidden.add(Number(GRID_BOUNDARY_LOWER.toFixed(9)));
-    forbidden.add(Number(GRID_BOUNDARY_UPPER.toFixed(9)));
-    let activeLevels = [];
-    if (showActive) {
-      try {
-        const resp = await fetch('/api/open_orders');
-        const data = await resp.json();
-        if (data.ok && Array.isArray(data.orders)) {
-          activeLevels = data.orders.map(o => Number(o.price)).filter(p => isFinite(p));
-          for (const p of activeLevels) forbidden.add(Number(p.toFixed(9)));
-        }
-      } catch (e) { console.warn('Failed to fetch open orders', e); }
-    }
-    // Tick step
-    const tickStep = (gridLevels.length > 1) ? (gridLevels[1] - gridLevels[0]) : 0.001;
-    const EPS = Math.max(1e-9, 0.25 * tickStep);
-    const nearThresholdEnter = 3 * tickStep;
-    const nearThresholdExit = 4 * tickStep;
-    // Price logic
-    let price = currentPrice;
-    if (price == null || isNaN(price)) price = (GRID_BOUNDARY_LOWER + GRID_BOUNDARY_UPPER) / 2;
-    // Determine gray lines to show
-    let grayLines = [];
-    let showBelow = false, showAbove = false;
-    if (price <= GRID_BOUNDARY_LOWER + nearThresholdEnter || price < GRID_BOUNDARY_LOWER) {
-      showBelow = true;
-    } else if (price >= GRID_BOUNDARY_UPPER - nearThresholdEnter || price > GRID_BOUNDARY_UPPER) {
-      showAbove = true;
-    } else if (price <= GRID_BOUNDARY_LOWER + nearThresholdExit) {
-      showBelow = true;
-    } else if (price >= GRID_BOUNDARY_UPPER - nearThresholdExit) {
-      showAbove = true;
-    }
-    // If both sides are "near" (very narrow grid), prefer side closest to price
-    if (showBelow && showAbove) {
-      if (Math.abs(price - GRID_BOUNDARY_LOWER) < Math.abs(price - GRID_BOUNDARY_UPPER)) {
-        showAbove = false;
-      } else {
-        showBelow = false;
-      }
-    }
-    // Generate gray lines
-    if (showBelow) {
-      for (let i = 1; i <= maxExtra; i++) {
-        let y = GRID_BOUNDARY_LOWER - i * tickStep;
-        if (y > 0) grayLines.push(y);
-      }
-    } else if (showAbove) {
-      for (let i = 1; i <= maxExtra; i++) {
-        let y = GRID_BOUNDARY_UPPER + i * tickStep;
-        grayLines.push(y);
-      }
-    }
-    // Remove gray lines that would collide with forbidden set (grid, boundaries, active), with EPS
-    grayLines = grayLines.filter(y => {
-      for (const f of forbidden) {
-        if (Math.abs(y - f) < EPS) return false;
-      }
-      return true;
-    });
-    // --- Determine which levels to show ---
-    let levelsToShow = [];
-    if (showActive) {
-      levelsToShow = [
-        ...activeLevels,
-        GRID_BOUNDARY_LOWER,
-        GRID_BOUNDARY_UPPER,
-        ...grayLines
-      ];
-    } else if (showAll) {
-      levelsToShow = [
-        ...gridLevels,
-        GRID_BOUNDARY_LOWER,
-        GRID_BOUNDARY_UPPER,
-        ...grayLines
-      ];
-    } else {
-      levelsToShow = [
-        GRID_BOUNDARY_LOWER,
-        GRID_BOUNDARY_UPPER,
-        ...grayLines
-      ];
-    }
-    // Remove duplicates and sort
-    levelsToShow = [...new Set(levelsToShow)].sort((a, b) => a - b);
-    // Draw lines
-    // Highlight nearest active order if in active mode
-    let nearestActive = null;
-    if (showActive && activeLevels.length && currentPrice != null && !isNaN(currentPrice)) {
-      let minDist = Infinity;
-      for (const p of activeLevels) {
-        const dist = Math.abs(currentPrice - p);
-        if (dist < minDist) {
-          minDist = dist;
-          nearestActive = p;
-        }
-      }
-    }
-    for (const y of levelsToShow) {
-      if (!isFinite(y)) continue;
-      let color = null, width = 1, dash = 'dot';
-      if (Math.abs(y - GRID_BOUNDARY_LOWER) < EPS || Math.abs(y - GRID_BOUNDARY_UPPER) < EPS) {
-        color = 'rgba(127, 92, 246, 0.8)'; // purple
-        width = 2;
-        dash = 'solid';
-      } else if (grayLines.includes(y)) {
-        color = '#cccccc';
-        width = 1;
-        dash = 'solid';
-      } else if (showActive && nearestActive !== null && Math.abs(y - nearestActive) < EPS) {
-        // Highlight for nearest active order: dashed, less bold for orange, solid for green
-        const isBuy = y <= currentPrice;
-        if (isBuy) {
-          color = 'rgba(46, 204, 113, 0.8)';
-          width = 4;
-          dash = 'solid';
-        } else {
-          color = 'rgba(243, 156, 18, 0.6)';
-          width = 2.5;
-          dash = 'dash';
-        }
-      } else {
-        // grid lines (buy/sell colors)
-        const isBuy = (currentPrice != null && !isNaN(currentPrice)) ? (y <= currentPrice) : false;
-        color = isBuy ? 'rgba(46, 204, 113, 0.25)' : 'rgba(243, 156, 18, 0.25)';
-        width = 1;
-        dash = 'dot';
-      }
-      shapes.push(shapeForY(y, color, width, dash));
-    }
-    Plotly.relayout('chart', { shapes });
-    applyGridTicksCustom(levelsToShow);
-  } catch (e) {
-    console.error('Error adding grid shapes:', e);
-  }
-}
-
-// Custom tick logic to match visible lines
-function applyGridTicksCustom(levels) {
-  if (!_chartReady) return;
-  try {
-    const yTicksVals = levels;
-    const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
-    const rel = {
-      'yaxis.tickmode': (yTicksVals.length ? 'array' : 'auto'),
-      'yaxis.tickvals': (yTicksVals.length ? yTicksVals : null),
-      'yaxis.ticktext': (yTicksVals.length ? yTicksText : null),
-    };
-    Plotly.relayout('chart', rel);
-  } catch (e) {
-    console.error('Error applying custom grid ticks:', e);
-  }
-}
-
-/* Force full chart re-render */
-function forceChartRerender() {
-  if (!_chartReady) return;
-  
-  try {
-    const chartEl = document.getElementById('chart');
-    if (!chartEl) return;
-    
-    // Clear the chart completely
-    Plotly.purge('chart');
-    _chartReady = false;
-    
-    // Recreate the chart with current data
-    setTimeout(async () => {
-      await loadHistory();
-    }, 100);
-  } catch (e) {
-    console.error('Error in force chart rerender:', e);
-  }
-}
-
-
-
-
-// --- Responsive, mutually exclusive chart modes with adaptive ticks and edge-aware gray latitudes ---
-
-function adaptiveTicks(ticks, maxTicks) {
-  if (!ticks || ticks.length <= maxTicks) {
-    return ticks;
-  }
-  const result = [];
-  const step = Math.ceil(ticks.length / maxTicks);
-  for (let i = 0; i < ticks.length; i += step) {
-    result.push(ticks[i]);
-  }
-  return result;
-}
-
-async function maybeAddGridLines() {
-  if (!_chartReady) return;
-  try {
-    const chartEl = document.getElementById('chart');
-    if (!chartEl) {
-      console.warn('Chart element not found for maybeAddGridLines');
-      return;
-    }
-    const cp = window.__currentPrice;
-    // Determine mode from checkboxes (persisted in localStorage)
-  var mode = 'boundaries';
-  if (showLatEl && showLatEl.checked) mode = 'latitudes';
-  else if (showGridEl && showGridEl.checked) mode = 'grid';
-  else if (showActiveEl && showActiveEl.checked) mode = 'active';
-  // All checkboxes always enabled and clickable
-  showLatEl.disabled = false;
-  showGridEl.disabled = false;
-  showActiveEl.disabled = false;
-  // Persist mode
-  try { localStorage.setItem('chartMode', mode); } catch(_) {}
-  // Restore mode from localStorage
-  mode = localStorage.getItem('chartMode') || 'grid';
-  showGridEl.checked = (mode === 'grid');
-  showActiveEl.checked = (mode === 'active');
-  showLatEl.checked = (mode === 'latitudes');
-
-  function setMode(newMode) {
-    showGridEl.checked = (newMode === 'grid');
-    showActiveEl.checked = (newMode === 'active');
-    showLatEl.checked = (newMode === 'latitudes');
-    try { localStorage.setItem('chartMode', newMode); } catch(_) {}
-    forceChartRerender();
-    maybeAddGridLines();
-  }
-
-  showGridEl.addEventListener('change', () => {
-    if (showGridEl.checked) setMode('grid');
-  });
-  showActiveEl.addEventListener('change', () => {
-    if (showActiveEl.checked) setMode('active');
-  });
-  showLatEl.addEventListener('change', () => {
-    if (showLatEl.checked) setMode('latitudes');
-  });
-
-    // Responsive: get chart height for adaptive ticks
-    let chartHeight = chartEl.offsetHeight || 400;
-    let pxPerTick = 70; // target px between ticks
-    let maxTicks = Math.max(2, Math.floor(chartHeight / pxPerTick));
-
-    // Always show purple boundaries
-    const lower = GRID_MIN || 0.215000, upper = GRID_MAX || 0.250000;
-    const boundaryShapes = [
-      shapeForY(lower, 'rgba(139, 92, 246, 0.8)', 3, 'solid'),
-      shapeForY(upper, 'rgba(139, 92, 246, 0.8)', 3, 'solid')
-    ];
-    let shapes = [], yTicksVals = [], yTicksText = [];
 
     if (mode === 'latitudes') {
-      const levels = buildAllLevels();
-      const cp = window.__currentPrice;
-      let latLines = [];
-      if(cp && levels.length > 0){
-          const N = 5;
-          const below = levels.filter(l => l < cp).slice(-N);
-          const above = levels.filter(l => l >= cp).slice(0, N);
-          latLines = below.concat(above);
-      }
-      shapes = latLines.map(y => shapeForY(y, 'rgba(128,128,128,0.4)', 1, 'dot'));
-      shapes = shapes.concat(boundaryShapes);
-      yTicksVals = [...new Set(latLines.concat([lower, upper]))].sort((a,b)=>a-b);
-      yTicksText = yTicksVals.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
-      Plotly.relayout('chart', { 
-        shapes,
-        'yaxis.tickmode': 'array',
-        'yaxis.tickvals': yTicksVals,
-        'yaxis.ticktext': yTicksText,
-        'yaxis.showgrid': true,
-        'yaxis.gridcolor': '#cccccc',
-        'yaxis.title.standoff': 18
-      });
-    } else if (mode === 'grid') {
-      const levels = buildAllLevels();
-      shapes = levels.map(y => shapeForY(y, 'rgba(128,128,128,0.2)', 1, 'solid'));
-      shapes = shapes.concat(boundaryShapes);
-      const all_levels = [...new Set(levels.concat([lower, upper]))].sort((a,b)=>a-b);
-      let chartHeight = chartEl.offsetHeight || 400;
-      let pxPerTick = 40;
-      let maxTicks = Math.max(2, Math.floor(chartHeight / pxPerTick));
-      yTicksVals = adaptiveTicks(all_levels, maxTicks);
-      yTicksText = yTicksVals.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
-      Plotly.relayout('chart', { 
-        shapes,
-        'yaxis.tickmode': 'array',
-        'yaxis.tickvals': yTicksVals,
-        'yaxis.ticktext': yTicksText,
-        'yaxis.showgrid': false,
-        'yaxis.title.standoff': 18
-      });
+        const numLines = 10; // Fixed number of intervals
+        if (GRID_MIN != null && GRID_MAX != null && GRID_MAX > GRID_MIN) {
+            const step = (GRID_MAX - GRID_MIN) / (numLines + 1);
+            for (let i = 1; i <= numLines; i++) {
+                const y = GRID_MIN + i * step;
+                shapes.push(shapeForY(y, '#cccccc', 1, 'solid'));
+                yTicksVals.push(y);
+            }
+        }
     } else if (mode === 'active') {
-      const openOrders = OPEN_ORDERS_RAW || [];
-      const orderPrices = openOrders.map(o => o.price);
-      const cp = window.__currentPrice;
-      let nearestOrderPrice = null;
-      if(cp && orderPrices.length > 0){
-          nearestOrderPrice = orderPrices.reduce((prev, curr) => {
-              return (Math.abs(curr - cp) < Math.abs(prev - cp) ? curr : prev);
-          });
-      }
-      shapes = orderPrices.map(p => {
-          const isNearest = (p === nearestOrderPrice);
-          return shapeForY(p, isNearest ? 'rgba(255, 165, 0, 0.9)' : 'rgba(255, 165, 0, 0.4)', isNearest ? 2 : 1, isNearest ? 'dash' : 'solid');
-      });
-      shapes = shapes.concat(boundaryShapes);
-      yTicksVals = [...new Set(orderPrices.concat([lower, upper]))].sort((a,b)=>a-b);
-      yTicksText = yTicksVals.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
-      Plotly.relayout('chart', { 
-        shapes,
-        'yaxis.tickmode': 'array',
-        'yaxis.tickvals': yTicksVals,
-        'yaxis.ticktext': yTicksText,
-        'yaxis.showgrid': false,
-        'yaxis.title.standoff': 18
-      });
-    } else { // boundaries only
-      shapes = boundaryShapes;
-      yTicksVals = [lower, upper];
-      yTicksText = yTicksVals.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
-      Plotly.relayout('chart', { 
-        shapes,
-        'yaxis.tickmode': 'array',
-        'yaxis.tickvals': yTicksVals,
-        'yaxis.ticktext': yTicksText,
-        'yaxis.showgrid': false,
-        'yaxis.title.standoff': 18
-      });
+        const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).sort((a, b) => a - b);
+        const { below, above } = nearestBracket(activeOrders, currentPrice);
+
+        for (const p of activeOrders) {
+            const isNearest = (p === below || p === above);
+            const color = isNearest ? 'rgba(255, 165, 0, 0.9)' : 'rgba(255, 165, 0, 0.4)';
+            const width = isNearest ? 2.5 : 1.5;
+            const dash = isNearest ? 'longdash' : 'dash';
+            shapes.push(shapeForY(p, color, width, dash));
+            yTicksVals.push(p);
+        }
+    } else { // 'grid' mode is the default
+        const allLevels = buildAllLevels();
+        for (const y of allLevels) {
+            if (y === GRID_MIN || y === GRID_MAX) continue;
+            const isBuy = (y <= (currentPrice ?? 0));
+            const color = isBuy ? 'rgba(46, 204, 113, 0.6)' : 'rgba(243, 156, 18, 0.6)';
+            shapes.push(shapeForY(y, color, 1, 'dash'));
+            yTicksVals.push(y);
+        }
     }
-  } catch (e) {
-    console.error('Error updating grid lines:', e);
-  }
+
+    // Finalize ticks and update layout
+    yTicksVals = [...new Set(yTicksVals)].sort((a, b) => a - b);
+    const yTicksText = yTicksVals.map(v => fmt(v, 6));
+
+    Plotly.relayout('chart', {
+        shapes: shapes,
+        'yaxis.tickmode': 'array',
+        'yaxis.tickvals': yTicksVals,
+        'yaxis.ticktext': yTicksText,
+    });
+}
+
+// Handles switching between chart modes
+function setChartMode(mode) {
+    showGridEl.checked = (mode === 'grid');
+    showActiveEl.checked = (mode === 'active');
+    showLatEl.checked = (mode === 'latitudes');
+    localStorage.setItem('chartMode', mode);
+    updateChart();
+}
+
+// This function will be called during initialization to set up event listeners
+function setupChartControls() {
+    showGridEl.addEventListener('change', () => { if(showGridEl.checked) setChartMode('grid'); });
+    showActiveEl.addEventListener('change', () => { if(showActiveEl.checked) setChartMode('active'); });
+    showLatEl.addEventListener('change', () => { if(showLatEl.checked) setChartMode('latitudes'); });
+
+    // Restore saved mode on page load
+    const savedMode = localStorage.getItem('chartMode') || 'grid';
+    setChartMode(savedMode);
 }
 
 /* ====== SSE ====== */
@@ -1436,12 +1126,15 @@ function startSSE(){
             
             await Plotly.newPlot('chart',
               [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
-              { margin:{l:50,r:20,t:10,b:40},
-                xaxis:{ title:'Time', showgrid:false, tickformat:"%d/%m", hoverformat:"%d/%m/%Y %H:%M:%S" },
+              { margin:{l:80,r:20,t:10,b:50},
+                xaxis:{ 
+                  title: { text: 'Time', standoff: 25 },
+                  showgrid:false, tickformat:"%d/%m<br><i style='font-size:0.8em'>(%H:00)</i>", hoverformat:"%d/%m/%Y %H:%M:%S" 
+                },
                 yaxis:{
                   title:{
                     text:'Price (USDT)',
-                    standoff: 18
+                    standoff: 40
                   },
                   showgrid:false,
                   tickmode: (yTicksVals.length? 'array':'auto'),
@@ -1453,7 +1146,7 @@ function startSSE(){
                 shapes: [] },
               { displayModeBar:false });
             _chartReady = true;
-            maybeAddGridLines();
+            updateChart();
             updateLastUpdated();
             console.log('Chart initialized with tick data');
           } catch (initError) {
@@ -1476,12 +1169,15 @@ function startSSE(){
               
               await Plotly.newPlot('chart',
                 [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
-                { margin:{l:50,r:20,t:10,b:40},
-                  xaxis:{ title:'Time', showgrid:false, tickformat:"%d/%m", hoverformat:"%d/%m/%Y %H:%M:%S" },
+                { margin:{l:80,r:20,t:10,b:50},
+                  xaxis:{ 
+                    title: { text: 'Time', standoff: 25 },
+                    showgrid:false, tickformat:"%d/%m<br><i style='font-size:0.8em'>(%H:00)</i>", hoverformat:"%d/%m/%Y %H:%M:%S" 
+                  },
                   yaxis:{
                     title:{
                       text:'Price (USDT)',
-                      standoff: 18
+                      standoff: 40
                     },
                     showgrid:false,
                     tickmode: (yTicksVals.length? 'array':'auto'),
@@ -1493,7 +1189,7 @@ function startSSE(){
                   shapes: [] },
                 { displayModeBar:false });
               _chartReady = true;
-              maybeAddGridLines();
+              updateChart();
               updateLastUpdated();
               console.log('Chart recreated successfully');
             }catch(recreateError){
@@ -1504,8 +1200,8 @@ function startSSE(){
           }
         }
 
-        // עדכן הדגשת שכבות סביב המחיר הנוכחי
-        maybeAddGridLines();
+        // Update chart lines based on new price
+        updateChart();
         updateLastUpdated();
         
       }catch(e){
@@ -1658,6 +1354,7 @@ function renderHistOrders(){
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${fmtDateTimeLocal(o.time)}</td>
+      <td>${fmtDateTimeLocal(o.time)}</td>
       <td><span class="pill ${o.side==='buy'?'buy':'sell'}">${o.side ?? '—'}</span></td>
       <td>${o.status ?? '—'}</td>
       <td class="mono">${fmt(o.price, 6)}</td>
@@ -1711,30 +1408,8 @@ function wireControls(){
   bindPersist('histSortDir','change', renderHistOrders);
   bindPersist('histFilter','input', renderHistOrders);
 
-
-  // (Already declared above)
-  try { const saved = localStorage.getItem('ui.showGrid'); if (saved !== null) showGridEl.checked = JSON.parse(saved) ? true : false; } catch (_) { }
-  showGridEl.addEventListener('change', () => {
-    try { localStorage.setItem('ui.showGrid', JSON.stringify(showGridEl.checked)); } catch (_) { }
-    forceChartRerender();
-    maybeAddGridLines();
-  });
-
-  // (Already declared above)
-  try { const savedA = localStorage.getItem('ui.showActiveLayers'); if (savedA !== null) showActiveEl.checked = JSON.parse(savedA) ? true : false; } catch (_) { }
-  showActiveEl.addEventListener('change', () => {
-    try { localStorage.setItem('ui.showActiveLayers', JSON.stringify(showActiveEl.checked)); } catch (_) { }
-    forceChartRerender();
-    maybeAddGridLines();
-  });
-
-  // (Already declared above)
-  try { const savedL = localStorage.getItem('ui.showLat'); if (savedL !== null) showLatEl.checked = JSON.parse(savedL) ? true : false; } catch (_) { }
-  showLatEl.addEventListener('change', () => {
-    try { localStorage.setItem('ui.showLat', JSON.stringify(showLatEl.checked)); } catch (_) { }
-    forceChartRerender();
-    maybeAddGridLines();
-  });
+  // Setup chart view controls
+  setupChartControls();
 
   const refreshBtn = document.getElementById('btnRefresh');
   if(refreshBtn) refreshBtn.addEventListener('click', ()=>{
@@ -1775,7 +1450,6 @@ function wireControls(){
 
   renderOpenOrders();
   renderHistOrders();
-  maybeAddGridLines();
 }
 
 async function boot(){
@@ -1802,7 +1476,7 @@ document.addEventListener('DOMContentLoaded', boot);
 
 @app.get("/")
 def index():
-    return render_template_string(
+    html_content = render_template_string(
         HTML,
         pair=PAIR,
         grid_min=GRID_MIN,
@@ -1810,6 +1484,12 @@ def index():
         grid_step_pct=GRID_STEP_PCT,
         split_trigger_env=SPLIT_TRIGGER_ENV,
     )
+    response = make_response(html_content)
+    # Add cache-busting headers
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 # =========================================================
 # MAIN

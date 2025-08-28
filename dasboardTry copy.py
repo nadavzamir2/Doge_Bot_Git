@@ -4,16 +4,15 @@
 """
 DOGE Grid Monitor Dashboard (single file)
 - Light theme (LTR)
-- Info cards (Current Price, Total Profit, Splits, Converted to BNB)
-- NEW: Bot Range card + spacing
-- NEW: Extra info cards (Open Orders count, History rows, Split accum/trigger, BNB pending, Reinvest pool)
-- Collapsible sections: Chart, Open Orders, Orders History
-- Live price via SSE (/stream)
+- Info cards (Bot Range + Layer spacing, Current Price, Total Profit, Splits, Converted to BNB)
+- EXTRA profits cards (Realized/Unrealized/Grid/Fees/Profit %) — shown if present in runtime_stats.json
+- Collapsible sections with small arrows; clicking the whole summary toggles
+- Chart with grid layers (BUY=light green, SELL=light orange), dashed; nearest layers emphasized dynamically vs. current price
+- Y axis ticks follow grid layer prices (full price, not shortened)
+- Live price via SSE (/stream) and *live stats via SSE on file-change* of runtime_stats.json
 - Persistent history via /history (saved to ~/doge_bot/data/price_history.json)
-- Separate endpoints for open orders and order history (not the same data)
-- NEW: /api/split_state reading ~/doge_bot/state.json (+ SPLIT_CHUNK_USD)
-- NEW: Grid layers checkbox: draws levels from actual Open Orders (buys=green, sells=orange)
-- NEW: Chart Y-axis ticks are exactly the grid levels (full price formatting .6f)
+- /api/open_orders  ו-/api/order_history עם מיון/סינון בצד לקוח
+- Local state for “Show grid layers” checkbox (localStorage)
 """
 
 import os
@@ -25,9 +24,9 @@ import pathlib
 import threading
 from collections import deque
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional
 
-from flask import Flask, Response, jsonify, request, render_template_string
+from flask import Flask, Response, jsonify, request, render_template_string, make_response
 from dotenv import load_dotenv
 import ccxt
 
@@ -44,7 +43,6 @@ API_SECRET = os.getenv("BINANCE_TRADE_SECRET") or os.getenv("BINANCE_API_SECRET"
 RECV_WINDOW = int(os.getenv("BINANCE_RECVWINDOW", "10000"))
 PAIR = os.getenv("PAIR", "DOGE/USDT").strip()
 
-# Grid info for UI card (optional)
 def _env_float(name: str):
     v = os.getenv(name)
     if v is None or v == "":
@@ -54,12 +52,18 @@ def _env_float(name: str):
     except Exception:
         return None
 
+# Grid info for UI card (optional)
 GRID_MIN = _env_float("GRID_MIN")
 GRID_MAX = _env_float("GRID_MAX")
 GRID_STEP_PCT = _env_float("GRID_STEP_PCT")
 
-# Profit-split trigger (for info card)
-SPLIT_CHUNK_USD = float(os.getenv("SPLIT_CHUNK_USD", "4.0"))
+# Profit split trigger fallback from env (if not in stats file)
+SPLIT_TRIGGER_ENV = (
+    _env_float("PROFIT_SPLIT_TRIGGER_USD")
+    or _env_float("SPLIT_TRIGGER_USD")
+    or _env_float("PROFIT_TRIGGER_USD")
+    or 0.0
+)
 
 DATA_DIR = pathlib.Path.home() / "doge_bot" / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -123,38 +127,44 @@ def _save_history_file():
     except Exception as e:
         print(f"[WARN] failed saving history file: {e}")
 
-def _read_stats_file() -> Dict[str, Any]:
+def _read_stats_file():
     # אם הבוט שלך כותב לכאן, הדשבורד יציג; אחרת יוצגו אפסים.
     try:
         if STATS_FILE.exists():
             with STATS_FILE.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                # normalize
-                return {
-                    "cumulative_profit_usd": float(data.get("cumulative_profit_usd", 0.0) or 0.0),
-                    "splits_count": int(data.get("splits_count", 0) or 0),
-                    "bnb_converted_usd": float(data.get("bnb_converted_usd", 0.0) or 0.0),
-                    "trades_count": int(data.get("trades_count", 0) or 0),
-                }
+                return data
     except Exception as e:
         print(f"[WARN] read stats failed: {e}")
     return {
         "cumulative_profit_usd": 0.0,
         "splits_count": 0,
         "bnb_converted_usd": 0.0,
-        "trades_count": 0,
+        # ערכים אופציונליים לרווחים נוספים:
+        "realized_profit_usd": 0.0,
+        "unrealized_profit_usd": 0.0,
+        "grid_profit_usd": 0.0,
+        "fees_usd": 0.0,
+        "profit_pct": 0.0,
+        # אפשרות שגם הטריגר ייכתב ע"י הבוט:
+        "split_trigger_usd": SPLIT_TRIGGER_ENV,
+        # לחלופין גם total_profit_usd אם קיים:
+        "total_profit_usd": 0.0,
     }
 
 _load_history_file()
 
 # =========================================================
-# LIVE PRICE RECORDER (poll public ticker + SSE stream)
+# LIVE PRICE & LIVE STATS (SSE)
 # =========================================================
 
 _current_price = None
 _current_ts_ms = None
 _sse_stop = threading.Event()
+
+_stats_mtime = None
+_stats_cache = None
 
 def record_price_point(price: float, ts_ms: Optional[int] = None):
     """Append price point to history (memory + disk) and update current."""
@@ -180,16 +190,57 @@ def _price_poller():
             pass
         _sse_stop.wait(3.0)
 
+def _load_stats_safely():
+    global _stats_mtime, _stats_cache
+    try:
+        if not STATS_FILE.exists():
+            return None
+        m = STATS_FILE.stat().st_mtime
+        if _stats_mtime is None or m != _stats_mtime:
+            _stats_mtime = m
+            _stats_cache = _read_stats_file()
+        return _stats_cache
+    except Exception:
+        return None
+
 def _sse_generator():
-    """Server-Sent Events generator pushing the most recent price periodically."""
-    last_sent = None
+    """Server-Sent Events generator pushing the most recent price periodically + live stats on change."""
+    last_sent_tick = None
+    last_sent_stats_ver = None
     while not _sse_stop.is_set():
+        # price ticks (every ~2s or when changes)
         if _current_price is not None:
             payload = {"t": _current_ts_ms or int(time.time() * 1000), "p": _current_price}
             js = json.dumps(payload, ensure_ascii=False)
-            if js != last_sent:
+            if js != last_sent_tick:
                 yield f"event: tick\ndata: {js}\n\n"
-                last_sent = js
+                last_sent_tick = js
+
+        # stats change event (after each trade the bot should update runtime_stats.json)
+        stats = _load_stats_safely()
+        if stats is not None:
+            ver = f"{_stats_mtime}"
+            if ver != last_sent_stats_ver:
+                try:
+                    split_trigger = float(stats.get("split_trigger_usd", SPLIT_TRIGGER_ENV) or 0.0)
+                except Exception:
+                    split_trigger = SPLIT_TRIGGER_ENV
+                # קבע מדיניות רווח להצגה: total_profit_usd אם קיים, אחרת cumulative_profit_usd
+                profit_live = stats.get("total_profit_usd", None)
+                if profit_live is None:
+                    profit_live = stats.get("cumulative_profit_usd", 0.0)
+                sse_stats = {
+                    "profit_usd": float(profit_live or 0.0),
+                    "split_trigger_usd": float(split_trigger or 0.0),
+                    "realized_profit_usd": float(stats.get("realized_profit_usd", 0.0) or 0.0),
+                    "unrealized_profit_usd": float(stats.get("unrealized_profit_usd", 0.0) or 0.0),
+                    "grid_profit_usd": float(stats.get("grid_profit_usd", 0.0) or 0.0),
+                    "fees_usd": float(stats.get("fees_usd", 0.0) or 0.0),
+                    "profit_pct": float(stats.get("profit_pct", 0.0) or 0.0),
+                }
+                yield f"event: stats\ndata: {json.dumps(sse_stats, ensure_ascii=False)}\n\n"
+                last_sent_stats_ver = ver
+
         time.sleep(2)
 
 # Start background poller
@@ -208,18 +259,39 @@ def stream():
 @app.get("/history")
 def history_endpoint():
     with HISTORY_LOCK:
+        # If no real data, provide some test data for demonstration
+        if not PRICE_WINDOW:
+            import time
+            now = int(time.time() * 1000)
+            test_data = []
+            # Generate test data around the grid boundaries (0.215000 and 0.250000)
+            base_prices = [0.220000, 0.225000, 0.230000, 0.235000, 0.240000, 0.245000]
+            for i, price in enumerate(base_prices):
+                test_data.append({
+                    "t": now - (len(base_prices) - i) * 60000,  # 1 minute intervals
+                    "p": price
+                })
+            return {"data": test_data}
         return {"data": list(PRICE_WINDOW)}
 
 @app.get("/api/stats")
 def api_stats():
     stats = _read_stats_file()
+    # החזר גם את כל סוגי הרווחים אם קיימים
+    split_trigger = stats.get("split_trigger_usd", SPLIT_TRIGGER_ENV)
     return {
         "price": _current_price,
-        "profit_usd": float(stats.get("cumulative_profit_usd", 0.0) or 0.0),
+        "profit_usd": float(stats.get("total_profit_usd", stats.get("cumulative_profit_usd", 0.0)) or 0.0),
         "splits_count": int(stats.get("splits_count", 0) or 0),
         "bnb_converted_usd": float(stats.get("bnb_converted_usd", 0.0) or 0.0),
-        "trades_count": int(stats.get("trades_count", 0) or 0),
-        "split_chunk_usd": SPLIT_CHUNK_USD,
+
+        "realized_profit_usd": float(stats.get("realized_profit_usd", 0.0) or 0.0),
+        "unrealized_profit_usd": float(stats.get("unrealized_profit_usd", 0.0) or 0.0),
+        "grid_profit_usd": float(stats.get("grid_profit_usd", 0.0) or 0.0),
+        "fees_usd": float(stats.get("fees_usd", 0.0) or 0.0),
+        "profit_pct": float(stats.get("profit_pct", 0.0) or 0.0),
+        "total_profit_usd": float(stats.get("total_profit_usd", stats.get("cumulative_profit_usd", 0.0)) or 0.0),
+        "split_trigger_usd": float(split_trigger or 0.0),
     }
 
 def _auth_available():
@@ -302,35 +374,36 @@ def api_order_history():
         except Exception as e2:
             return {"ok": False, "error": str(e2), "orders": []}
 
-@app.get("/api/split_state")
-def api_split_state():
-    """
-    Return profit-split runtime state from ~/doge_bot/state.json
-    (produced by profit_split.py). Adds split_chunk_usd from ENV.
-    """
+@app.post("/api/stop_bot")
+def api_stop_bot():
+    print("[API] stop bot requested")
+    return {"ok": True}
+
+@app.post("/api/resume_bot")
+def api_resume_bot():
+    print("[API] resume bot requested")
+    return {"ok": True}
+
+@app.post("/api/cancel_all_orders")
+def api_cancel_all_orders():
+    if not _auth_available():
+        return {"ok": False, "error": "No API key/secret configured"}
     try:
-        state_path = pathlib.Path.home() / "doge_bot" / "state.json"
-        st = {}
-        if state_path.exists():
-            with state_path.open("r", encoding="utf-8") as f:
-                st = json.load(f) or {}
-        return {
-            "ok": True,
-            "state": {
-                "split_accumulator_usd": float(st.get("split_accumulator_usd", 0.0) or 0.0),
-                "bnb_pending_usd": float(st.get("bnb_pending_usd", 0.0) or 0.0),
-                "reinvest_pool_usd": float(st.get("reinvest_pool_usd", 0.0) or 0.0),
-                "total_sent_to_bnb_usd": float(st.get("total_sent_to_bnb_usd", 0.0) or 0.0),
-                "total_reinvested_usd": float(st.get("total_reinvested_usd", 0.0) or 0.0),
-                "last_update_ts": float(st.get("last_update_ts", 0.0) or 0.0),
-            },
-            "split_chunk_usd": SPLIT_CHUNK_USD,
-        }
+        orders = CLIENT.fetch_open_orders(PAIR, params={"recvWindow": RECV_WINDOW})
+        for o in orders:
+            oid = o.get("id") or o.get("orderId") or o.get("order_id")
+            if not oid:
+                continue
+            try:
+                CLIENT.cancel_order(oid, PAIR, params={"recvWindow": RECV_WINDOW})
+            except Exception as e:
+                print(f"[WARN] cancel {oid} failed: {e}")
+        return {"ok": True}
     except Exception as e:
-        return {"ok": False, "error": str(e), "state": {}, "split_chunk_usd": SPLIT_CHUNK_USD}
+        return {"ok": False, "error": str(e)}
 
 # =========================================================
-# FULL UI (HTML)
+# FULL UI (HTML) — LTR, LIGHT THEME, COLLAPSIBLE, GRID CHART
 # =========================================================
 
 HTML = r"""<!doctype html>
@@ -351,19 +424,39 @@ HTML = r"""<!doctype html>
     --grid: #e2e8f0;
   }
   body { margin:0; font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background: var(--bg); color: var(--fg); }
-  .wrap { max-width: 1200px; margin: 24px auto; padding: 0 16px; }
-  h1 { margin: 4px 0 16px; font-size: 22px; }
-  .cards { display:grid; grid-template-columns: repeat(4, minmax(160px,1fr)); gap:12px; margin-bottom:16px; }
+  .wrap { width: 90vw; margin: 24px auto; padding: 0 16px; height:90vh; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; }
+  h1 { margin: 4px 0 16px; font-size: 22px; display:flex; align-items:center; gap:12px; }
+  .last-update { font-size:14px; color:var(--muted); }
+  .top-actions { display:flex; gap:6px; }
+  .icon-btn { border:1px solid var(--grid); background:var(--card); border-radius:8px; padding:4px 6px; cursor:pointer; position: relative; }
+  .icon-btn:hover { background:#f5f5f5; }
+  /* Enhanced tooltip styling for buttons */
+  .icon-btn[title]:hover::after {
+    content: attr(title);
+    position: absolute;
+    bottom: -35px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    white-space: nowrap;
+    z-index: 1000;
+    pointer-events: none;
+  }
+  .cards { display:grid; grid-template-columns: repeat(5, minmax(160px,1fr)); gap:12px; margin-bottom:16px; }
   .card { background:var(--card); border:1px solid var(--grid); border-radius:12px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
   .card h3 { margin:0 0 6px; font-size:13px; color:var(--muted); font-weight:600; }
   .card .v { font-size:20px; font-weight:700; }
-  .small { font-size:12px; color:var(--muted); }
+  .subnote { font-size:12px; color:var(--muted); margin-top:4px; }
   .sections { display:grid; gap:12px; }
   details { background:var(--card); border:1px solid var(--grid); border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
-  details > summary { cursor:pointer; padding:12px 14px; font-weight:600; list-style:none; display:flex; gap:8px; align-items:center;}
-  details > summary::-webkit-details-marker { display:none; }
-  details[open] > summary { border-bottom:1px solid var(--grid); }
-  .chev { font-size:12px; color:var(--muted); }
+  details > summary { cursor:pointer; padding:12px 14px; font-weight:600; list-style:none; display:flex; align-items:center; gap:8px; user-select:none; }
+  details > summary::before { content: '▸'; font-size:12px; color:var(--muted); transition: transform .15s ease; }
+  details[open] > summary::before { transform: rotate(90deg); }
   .section-body { padding:12px 14px; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th,td { text-align:left; padding:8px; border-bottom:1px solid var(--grid); }
@@ -374,25 +467,41 @@ HTML = r"""<!doctype html>
   .pill.sell { background:#fff5f5; color:#c53030; }
   #chart { width:100%; height:420px; }
 
-  /* controls for sort/filter */
   .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
   .controls label { font-size:12px; color:var(--muted); }
   .controls select, .controls input[type="text"] {
     font-size:12px; padding:4px 6px; border:1px solid var(--grid); border-radius:8px; background:#fff;
   }
-  .subnote { font-size:12px; color:var(--muted); margin-top:4px; }
-
-  .row-emph { background: #fffceb; } /* הדגשת שורת הקצה בטבלה */
+  
+  /* Light yellow highlighting for better visibility */
+  .highlight-order {
+    background-color: rgba(255, 251, 125, 0.3) !important; /* Light yellow background */
+    font-weight: bold !important; /* Bold text */
+    border-left: 3px solid rgba(255, 193, 7, 0.8);
+  }
+  
+  /* Purple grid boundary highlighting */
+  .grid-boundary {
+    color: #8b5cf6 !important;
+  }
 </style>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
   <div class="wrap">
-    <h1>DOGE Grid Monitor — <span id="pair" class="mono"></span></h1>
+    <div class="topbar">
+      <h1>DOGE Grid Monitor — <span id="pair" class="mono"></span> <span id="lastUpdated" class="last-update">Last updated —</span></h1>
+      <div class="top-actions">
+        <button id="btnRefresh" class="icon-btn" title="Refresh all data (orders, history, stats)">🔄</button>
+        <button id="btnStop" class="icon-btn" title="Stop the trading bot">⏹️</button>
+        <button id="btnResume" class="icon-btn" title="Resume the trading bot">▶️</button>
+        <button id="btnCancel" class="icon-btn" title="Cancel all open orders">❌</button>
+      </div>
+    </div>
 
     <!-- Top info cards -->
     <div class="cards">
-      <!-- Bot Range -->
+      <!-- Bot Range card -->
       <div class="card">
         <h3>Bot Range</h3>
         <div id="rangeVal" class="v mono">—</div>
@@ -400,35 +509,75 @@ HTML = r"""<!doctype html>
       </div>
 
       <div class="card"><h3>Current Price</h3><div id="priceVal" class="v mono">—</div></div>
-      <div class="card"><h3>Total Profit (USD)</h3><div id="profitVal" class="v mono">0.00</div></div>
+
+      <!-- Total Profit card with (profit/trigger) subnote -->
+      <div class="card">
+        <h3>Total Profit (USD)</h3>
+        <div id="profitVal" class="v mono">0.00</div>
+        <div class="subnote" id="profitTriggerNote">(0.00 / 0.00)</div>
+      </div>
+
       <div class="card"><h3>Splits Count</h3><div id="splitsVal" class="v mono">0</div></div>
       <div class="card"><h3>Converted to BNB (USD)</h3><div id="bnbVal" class="v mono">0.00</div></div>
+    </div>
 
-      <!-- NEW live cards -->
-      <div class="card"><h3>Open Orders (Count)</h3><div id="openCountVal" class="v mono">0</div></div>
-      <div class="card"><h3>History Rows (Count)</h3><div id="histCountVal" class="v mono">0</div></div>
-      <div class="card"><h3>Split Accum / Trigger</h3><div id="splitAccumVal" class="v mono">0.00/0.00</div></div>
-      <div class="card"><h3>BNB Pending (USD)</h3><div id="bnbPendVal" class="v mono">0.00</div></div>
-      <div class="card"><h3>Reinvest Pool (USD)</h3><div id="rePoolVal" class="v mono">0.00</div></div>
+    <!-- EXTRA profit cards (values only; לא נוגעים בשאר) -->
+    <div class="cards">
+      <div class="card"><h3>Realized Profit (USD)</h3><div id="profitRealizedVal" class="v mono">0.00</div></div>
+      <div class="card"><h3>Unrealized Profit (USD)</h3><div id="profitUnrealizedVal" class="v mono">0.00</div></div>
+      <div class="card"><h3>Grid Profit (USD)</h3><div id="profitGridVal" class="v mono">0.00</div></div>
+      <div class="card"><h3>Fees (USD)</h3><div id="feesVal" class="v mono">0.00</div></div>
+      <div class="card"><h3>Profit %</h3><div id="profitPctVal" class="v mono">0.00</div></div>
     </div>
 
     <div class="sections">
       <!-- Chart -->
-      <details open id="secChart">
-        <summary><span class="chev">▸</span> Price Chart</summary>
-        <div class="section-body" style="padding-top:8px;">
-          <label style="font-size:12px;color:var(--muted);user-select:none;">
-            <input id="chkGridLayers" type="checkbox" style="vertical-align:middle;"/>
-            Show grid layers
-          </label>
-          <div id="chart" style="margin-top:8px;"></div>
+      <details open id="chartBox">
+        <summary>Price Chart</summary>
+        <div class="section-body">
+          <!-- Color Legend -->
+          <div style="margin-bottom: 12px; padding: 8px; background: #f8f9fa; border-radius: 6px; font-size: 12px;">
+            <strong>Chart Legend:</strong>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(46, 204, 113, 0.6); margin-right: 4px;"></span>
+              <span style="color: #2c7a7b;">Buy Orders</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(243, 156, 18, 0.6); margin-right: 4px;"></span>
+              <span style="color: #c53030;">Sell Orders</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(139, 92, 246, 0.8); margin-right: 4px;"></span>
+              <span style="color: #8b5cf6;">Grid Boundaries</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 1px; background: #cccccc; margin-right: 4px;"></span>
+              <span style="color: #666;">Gray Latitudes</span>
+            </span>
+          </div>
+          <div style="display:flex;gap:12px;margin-bottom:8px;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:6px;user-select:none">
+              <input id="showGrid" type="checkbox" checked/>
+              <span>Show grid layers</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;user-select:none">
+              <input id="showActiveLayers" type="checkbox"/>
+              <span>Show active layers</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;user-select:none">
+              <input id="showLat" type="checkbox" checked/>
+              <span>Show gray latitudes</span>
+            </label>
+          </div>
+          <div id="chart"></div>
         </div>
       </details>
 
       <!-- Open Orders -->
-      <details open id="secOpen">
-        <summary><span class="chev">▸</span> <span id="ttlOpen">Open Orders</span></summary>
+      <details open id="openBox">
+        <summary>Open Orders <span id="openCount" class="mono" style="color:var(--muted)">(0)</span></summary>
         <div class="section-body">
+          <!-- sort & filter controls -->
           <div class="controls">
             <label>Sort by
               <select id="openSortBy">
@@ -460,14 +609,15 @@ HTML = r"""<!doctype html>
             </tr></thead>
             <tbody></tbody>
           </table>
-          <div id="openNote" class="small"></div>
+          <div id="openNote" style="color:var(--muted);margin-top:6px;"></div>
         </div>
       </details>
 
       <!-- Orders History -->
-      <details open id="secHist">
-        <summary><span class="chev">▸</span> <span id="ttlHist">Orders History</span></summary>
+      <details open id="histBox">
+        <summary>Orders History <span id="histCount" class="mono" style="color:var(--muted)">(0)</span></summary>
         <div class="section-body">
+          <!-- sort & filter controls -->
           <div class="controls">
             <label>Sort by
               <select id="histSortBy">
@@ -501,7 +651,7 @@ HTML = r"""<!doctype html>
             </tr></thead>
             <tbody></tbody>
           </table>
-          <div id="histNote" class="small"></div>
+          <div id="histNote" style="color:var(--muted);margin-top:6px;"></div>
         </div>
       </details>
     </div>
@@ -510,10 +660,13 @@ HTML = r"""<!doctype html>
 <script>
 "use strict";
 
+var showGridEl, showActiveEl, showLatEl;
+
 const PAIR = {{ pair|tojson }};
+const SPLIT_TRIGGER_ENV = {{ split_trigger_env|tojson }};
 document.getElementById('pair').textContent = PAIR;
 
-/* range & spacing for the top card */
+/* range & spacing from server-side (env), if provided */
 const GRID_MIN = {{ grid_min|tojson }};
 const GRID_MAX = {{ grid_max|tojson }};
 const GRID_STEP_PCT = {{ grid_step_pct|tojson }};
@@ -532,11 +685,20 @@ const GRID_STEP_PCT = {{ grid_step_pct|tojson }};
 
 /* helpers */
 function pad2(n){ return n<10 ? '0'+n : ''+n; }
-function fmt(n, d=5){ if(n===null||n===undefined||isNaN(n)) return '—'; return Number(n).toFixed(d); }
+function fmt(n, d=6){
+  if(n===null||n===undefined||isNaN(n)) return '—';
+  let s = Number(n).toFixed(d);
+  if (s.startsWith('.')) {
+    s = '0' + s;
+  } else if (s.startsWith('-.')) {
+    s = s.replace('-.', '-0.');
+  }
+  return s;
+}
 function fmt2(n){ return fmt(n,2); }
-function fmt6(n){ return fmt(n,6); }
 function fmt0(n){ return (n==null)?'—':String(n); }
 
+/* date/time: dd/mm/yyyy HH:MM:SS (24h) */
 function fmtDateTimeLocal(s){
   const d = new Date(s);
   if (isNaN(d.getTime())) return '—';
@@ -549,216 +711,541 @@ function fmtDateTimeLocal(s){
   return `${day}/${mon}/${yr} ${hh}:${mm}:${ss}`;
 }
 
-/* state */
-let _chartReady = false;
-let _lastLivePrice = null;
-
-/* ===== Grid Layers (checkbox, shapes from open orders levels) ===== */
-function getLocalBool(key, def=false){
-  try{ const v = localStorage.getItem(key); if(v===null) return def; return v === "1"; }catch(_){ return def; }
+function updateLastUpdated(){
+  const el = document.getElementById('lastUpdated');
+  if(!el) return;
+  const now = new Date();
+  el.textContent = 'Last updated ' + fmtDateTimeLocal(now);
 }
-function setLocalBool(key, val){ try{ localStorage.setItem(key, val ? "1" : "0"); }catch(_){} }
 
-const GRID_KEY_SHOW = "ui.showGridLayers";
+/* ===== Build full grid levels list (min → max) ===== */
+function buildAllLevels(){
+  if (GRID_MIN == null || GRID_MAX == null || GRID_STEP_PCT == null) return [];
+  const min = Number(GRID_MIN), max = Number(GRID_MAX), step = Number(GRID_STEP_PCT)/100.0;
+  if (!(min > 0) || !(max > min) || !(step > 0)) return [];
+  const levels = [min];
+  let p = min;
+  const limit = 2000; // הגנה
+  let guard = 0;
+  while (guard++ < limit){
+    const next = p * (1 + step);
+    if (next > max * (1 + 1e-12)) break;
+    levels.push(next);
+    p = next;
+    if (Math.abs(next - max) / max < 1e-10) break;
+  }
+  if (levels[levels.length-1] < max - 1e-12) levels.push(max);
+  return levels;
+}
 
-let _gridShow = getLocalBool(GRID_KEY_SHOW, false);
-let _gridLevelsFromOrders = {buys: [], sells: []};  // updated from open orders
-let _tickVals = []; // y-axis ticks derived from grid levels
+/* ===== Choose nearest below/above levels for emphasis ===== */
+function nearestBracket(levels, price){
+  if (!levels.length || price == null || isNaN(price)) return {below:null, above:null};
+  let below = null, above = null;
+  for (let i=0; i<levels.length; i++){
+    const y = levels[i];
+    if (y <= price) below = y;
+    if (y >= price){ above = y; break; }
+  }
+  return {below, above};
+}
 
-function wireGridCheckbox(){
-  const chk = document.getElementById("chkGridLayers");
-  if(!chk) return;
-  chk.checked = _gridShow;
-  chk.addEventListener("change", ()=>{
-    _gridShow = chk.checked;
-    setLocalBool(GRID_KEY_SHOW, _gridShow);
-    updateGridLayersOnChart(_lastLivePrice ?? 0);
+/* ===== Chart bootstrap guard ===== */
+let _chartReady = false;
+
+/* ===== Data validation functions ===== */
+function isValidChartData(data) {
+  if (!Array.isArray(data)) {
+    console.warn('Chart data is not an array:', data);
+    return false;
+  }
+  
+  for (let i = 0; i < data.length; i++) {
+    const point = data[i];
+    if (!point || typeof point !== 'object') {
+      console.warn('Invalid data point at index', i, ':', point);
+      return false;
+    }
+    if (!('t' in point) || !('p' in point)) {
+      console.warn('Data point missing required fields (t, p) at index', i, ':', point);
+      return false;
+    }
+    if (typeof point.p !== 'number' || isNaN(point.p)) {
+      console.warn('Invalid price value at index', i, ':', point.p);
+      return false;
+    }
+  }
+  return true;
+}
+
+function sanitizeChartData(data) {
+  if (!Array.isArray(data)) return [];
+  
+  return data.filter(point => {
+    return point && 
+           typeof point === 'object' && 
+           't' in point && 
+           'p' in point && 
+           typeof point.p === 'number' && 
+           !isNaN(point.p) &&
+           isFinite(point.p);
   });
 }
 
-function uniqSorted(arr){
-  const s = Array.from(new Set(arr.filter(x=>typeof x==="number" && isFinite(x))));
-  s.sort((a,b)=>a-b);
-  return s;
-}
-
-function buildShapesFromLevels(levels, currentPrice){
-  const buys = uniqSorted(levels.buys || []);
-  const sells = uniqSorted(levels.sells || []);
-  // find nearest below and above
-  let lower=null, upper=null;
-  for (const v of buys){ if (v<=currentPrice) lower = v; else break; }
-  for (const v of sells){ if (v>=currentPrice) { upper = v; break; } }
-  const shapes = [];
-  // buys → green, thin dashed; nearest a bit thicker
-  for (const v of buys){
-    const emph = (lower!=null && Math.abs(v-lower)<1e-15) ? 0.9 : 0.5;
-    const width = (lower!=null && Math.abs(v-lower)<1e-15) ? 2 : 1;
-    shapes.push({
-      type:"line", xref:"paper", x0:0, x1:1, yref:"y", y0:v, y1:v,
-      line:{ color:`rgba(46,204,113,${emph})`, width:width, dash:"dot" }
-    });
+function showChartError(message) {
+  console.error('Chart error:', message);
+  const chartEl = document.getElementById('chart');
+  if (chartEl) {
+    chartEl.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--muted); border: 1px dashed #ccc; background: #f9f9f9;">
+      <p style="margin: 0; font-size: 14px;">⚠️ Chart Error</p>
+      <p style="margin: 5px 0 0 0; font-size: 12px;">${message}</p>
+    </div>`;
   }
-  // sells → orange
-  for (const v of sells){
-    const emph = (upper!=null && Math.abs(v-upper)<1e-15) ? 0.9 : 0.5;
-    const width = (upper!=null && Math.abs(v-upper)<1e-15) ? 2 : 1;
-    shapes.push({
-      type:"line", xref:"paper", x0:0, x1:1, yref:"y", y0:v, y1:v,
-      line:{ color:`rgba(243,156,18,${emph})`, width:width, dash:"dot" }
-    });
-  }
-  return shapes;
 }
 
-function updateYAxisTicksFromLevels(levels){
-  const vals = uniqSorted([...(levels.buys||[]), ...(levels.sells||[])]);
-  _tickVals = vals;
-  const ticktext = vals.map(v=>Number(v).toFixed(6).replace(/^\./, '0.'));
-  const layoutUpdate = {
-    yaxis: {
-      tickmode: "array",
-      tickvals: vals,
-      ticktext: ticktext,
-      automargin: true,
-      title: { text: "Price (USDT)", standoff: 14 },
-      ticklabelposition: "outside",
-      tickfont: { size: 8 }
-    }
-  };
-  try { Plotly.relayout('chart', layoutUpdate); } catch(_) {}
+
+/* ===== Update profits cards ===== */
+function setText(id, val, digits=2){
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (val === null || val === undefined || isNaN(val)) el.textContent = '0.00';
+  else el.textContent = Number(val).toFixed(digits);
 }
 
-function updateGridLayersOnChart(currentPrice){
-  _lastLivePrice = currentPrice;
-  const show = document.getElementById("chkGridLayers")?.checked ?? false;
-  const div = document.getElementById('chart');
-  if(!div || !div.layout) return;
-  if(!show){
-    const newLayout = {...div.layout};
-    delete newLayout.shapes;
-    try{ Plotly.relayout('chart', newLayout); }catch(_){}
-    return;
-  }
-  const shapes = buildShapesFromLevels(_gridLevelsFromOrders, typeof currentPrice==="number"?currentPrice:0);
-  try{ Plotly.relayout('chart', { shapes }); }catch(_){}
+function updateProfitWithTrigger(profit, trigger){
+  const el = document.getElementById('profitTriggerNote');
+  if (!el) return;
+  const p = (profit==null || isNaN(profit)) ? 0 : Number(profit);
+  const t = (trigger==null || isNaN(trigger)) ? 0 : Number(trigger);
+  el.textContent = `(${p.toFixed(2)} / ${t.toFixed(2)})`;
 }
 
-/* ===== Stats / Split state ===== */
+/* ===== stats (polling fallback) ===== */
 async function loadStats(){
   try{
     const r = await fetch('/api/stats');
     const j = await r.json();
-    if('price' in j && j.price!=null) document.getElementById('priceVal').textContent = fmt6(j.price);
+    if('price' in j) document.getElementById('priceVal').textContent = fmt(j.price, 6);
     document.getElementById('profitVal').textContent = fmt2(j.profit_usd);
     document.getElementById('splitsVal').textContent = fmt0(j.splits_count);
     document.getElementById('bnbVal').textContent = fmt2(j.bnb_converted_usd);
+
+    // EXTRA profits
+    setText('profitRealizedVal', j.realized_profit_usd ?? 0, 2);
+    setText('profitUnrealizedVal', j.unrealized_profit_usd ?? 0, 2);
+    setText('profitGridVal', j.grid_profit_usd ?? 0, 2);
+    setText('feesVal', j.fees_usd ?? 0, 2);
+    setText('profitPctVal', j.profit_pct ?? 0, 2);
+
+    updateProfitWithTrigger(j.profit_usd ?? 0, j.split_trigger_usd ?? SPLIT_TRIGGER_ENV);
+    updateLastUpdated();
   }catch(e){}
 }
 
-async function loadSplitState(){
-  try{
-    const r = await fetch('/api/split_state');
-    const j = await r.json();
-    if (j.ok && j.state){
-      const acc = Number(j.state.split_accumulator_usd||0);
-      const trig = Number(j.split_chunk_usd||0);
-      document.getElementById('splitAccumVal').textContent = `${fmt2(acc)}/${fmt2(trig)}`;
-      document.getElementById('bnbPendVal').textContent = fmt2(Number(j.state.bnb_pending_usd||0));
-      document.getElementById('rePoolVal').textContent = fmt2(Number(j.state.reinvest_pool_usd||0));
-    }
-  }catch(e){}
-}
-
-/* ===== Chart ===== */
+/* ===== history + chart ===== */
 async function loadHistory(){
+  const chartEl = document.getElementById('chart');
+  if (!chartEl) {
+    console.error('Chart element not found');
+    return;
+  }
+  console.log('DEBUG: chartEl exists:', !!chartEl);
+
   try{
+    console.log('Loading history data...');
     const r = await fetch('/history');
+    
+    if (!r.ok) {
+      throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+    }
+    
     const j = await r.json();
-    const pts = Array.isArray(j.data)? j.data : [];
+    
+    // Validate response structure
+    if (!j || typeof j !== 'object') {
+      throw new Error('Invalid JSON response from /history');
+    }
+    
+    const rawData = j.data || [];
+    console.log('Raw history data points:', rawData.length);
+    
+    if (!isValidChartData(rawData)) {
+      console.warn('Invalid chart data received, attempting to sanitize...');
+    }
+    
+    const pts = sanitizeChartData(rawData);
+    console.log('Sanitized data points:', pts.length);
+    
+    if (pts.length === 0) {
+      console.warn('No valid data points after sanitization');
+      showChartError('No historical data available');
+      return;
+    }
+
     const xs = pts.map(p => new Date(p.t));
     const ys = pts.map(p => p.p);
+
+    // Validate that we have valid coordinates
+    if (xs.some(x => isNaN(x.getTime())) || ys.some(y => !isFinite(y))) {
+      throw new Error('Invalid time or price values in data');
+    }
+
+    const levels = buildAllLevels();
+    const yTicksVals = levels;
+  // Always show leading zero for y-axis ticks
+  const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
+
     const layout = {
-      margin:{l:60,r:20,t:10,b:40},
-      xaxis:{ title:'Time', showgrid:true, zeroline:false,
-              tickformat: "%d/%m/%Y %H:%M", hoverformat: "%d/%m/%Y %H:%M:%S" },
+      margin:{l:75,r:20,t:10,b:50},
+      xaxis:{ 
+        title: { text: 'Time', standoff: 25 },
+        showgrid:false, zeroline:false,
+        tickformat: "%d/%m<br><i style='font-size:0.8em'>(%H:00)</i>", hoverformat: "%d/%m/%Y %H:%M:%S" 
+      },
       yaxis:{
-        title: { text:'Price (USDT)', standoff:14 }, /* מרווח כדי שלא יעלה על השנתות */
-        showgrid:true, zeroline:false,
-        tickformat: ".6f",
-        automargin: true,
-        ticklabelposition: "outside",
-        tickfont: { size: 11 }
+        title:{
+          text:'Price (USDT)',
+          standoff: 50 // add space to prevent overlap
+        },
+        showgrid:false, zeroline:false,
+        tickmode: (yTicksVals.length? 'array':'auto'),
+        tickvals: (yTicksVals.length? yTicksVals: undefined),
+        ticktext: (yTicksVals.length? yTicksText: undefined),
+        hoverformat: ".6f"
       },
       paper_bgcolor:'rgba(0,0,0,0)',
-      plot_bgcolor:'rgba(0,0,0,0)'
+      plot_bgcolor:'rgba(0,0,0,0)',
+      shapes: []
     };
-    const data = [{ x: xs, y: ys, mode:'lines', name: 'DOGE/USDT' }];
-    await Plotly.react('chart', data, layout, {displayModeBar:false});
+    const data = [{ x: xs, y: ys, mode:'lines', name: PAIR }];
+    
+  console.log('DEBUG: About to call Plotly.react. Data:', data, 'Layout:', layout);
+  console.log('Creating chart with', data[0].x.length, 'data points');
+  await Plotly.react('chart', data, layout, {displayModeBar:false});
     _chartReady = true;
+    updateChart();
+    updateLastUpdated();
+    console.log('Chart loaded successfully');
+    
   }catch(e){
-    console.warn('history load failed', e);
+    console.error('History load failed:', e);
+    
+    // Try to create an empty chart as fallback
     try{
+      console.log('Creating fallback empty chart...');
+      const levels = buildAllLevels();
+      const yTicksVals = levels;
+  const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
+      
       await Plotly.newPlot('chart',
-        [{x:[], y:[], mode:'lines', name:'DOGE/USDT'}],
-        { margin:{l:60,r:20,t:10,b:40},
-          xaxis:{ title:'Time', tickformat:"%d/%m/%Y %H:%M", hoverformat:"%d/%m/%Y %H:%M:%S" },
-          yaxis:{ title:{text:'Price (USDT)', standoff:14}, tickformat:".6f", automargin:true, ticklabelposition:"outside", tickfont:{size:11}},
-          paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)' },
+        [{x:[], y:[], mode:'lines', name: PAIR}],
+        { margin:{l:80,r:20,t:10,b:50},
+          xaxis:{ 
+            title: { text: 'Time', standoff: 25 },
+            showgrid:false, tickformat:"%d/%m<br><i style='font-size:0.8em'>(%H:00)</i>", hoverformat:"%d/%m/%Y %H:%M:%S" 
+          },
+          yaxis:{
+            title:{
+              text:'Price (USDT)',
+              standoff: 40
+            },
+            showgrid:false,
+            tickmode: (yTicksVals.length? 'array':'auto'),
+            tickvals: (yTicksVals.length? yTicksVals: undefined),
+            ticktext: (yTicksVals.length? yTicksText: undefined),
+            hoverformat: ".6f"
+          },
+          paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+          shapes: [] },
         { displayModeBar:false });
       _chartReady = true;
-    }catch(_){}
+      updateChart();
+      updateLastUpdated();
+      console.log('Fallback empty chart created');
+      
+    }catch(fallbackError){
+      console.error('Failed to create fallback chart:', fallbackError);
+      showChartError(`Failed to load chart: ${e.message || 'Unknown error'}`);
+    }
   }
-  wireGridCheckbox();
-  updateGridLayersOnChart(_lastLivePrice ?? 0);
 }
 
-/* ===== SSE live price ===== */
+/* ===== Chart Line and Tick Logic ===== */
+
+// Helper to create a line shape for Plotly
+function shapeForY(y, color, width, dash) {
+    return {
+        type: 'line', xref: 'paper', x0: 0, x1: 1,
+        yref: 'y', y0: y, y1: y,
+        line: { color, width, dash },
+    };
+}
+
+// Main function to update chart lines and ticks based on the selected mode
+async function updateChart() {
+    if (!_chartReady) return;
+    const chartEl = document.getElementById('chart');
+    if (!chartEl || !chartEl.layout) return;
+
+    const mode = localStorage.getItem('chartMode') || 'grid';
+    const currentPrice = window.__currentPrice;
+
+    let shapes = [];
+    let yTicksVals = [];
+
+    // Always add purple boundary lines
+    if (GRID_MIN != null) {
+        shapes.push(shapeForY(GRID_MIN, 'rgba(139, 92, 246, 0.8)', 2, 'solid'));
+        yTicksVals.push(GRID_MIN);
+    }
+    if (GRID_MAX != null) {
+        shapes.push(shapeForY(GRID_MAX, 'rgba(139, 92, 246, 0.8)', 2, 'solid'));
+        yTicksVals.push(GRID_MAX);
+    }
+
+    if (mode === 'latitudes') {
+        const numLines = 10; // Fixed number of intervals
+        if (GRID_MIN != null && GRID_MAX != null && GRID_MAX > GRID_MIN) {
+            const step = (GRID_MAX - GRID_MIN) / (numLines + 1);
+            for (let i = 1; i <= numLines; i++) {
+                const y = GRID_MIN + i * step;
+                shapes.push(shapeForY(y, '#cccccc', 1, 'solid'));
+                yTicksVals.push(y);
+            }
+        }
+    } else if (mode === 'active') {
+        const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).sort((a, b) => a - b);
+        const { below, above } = nearestBracket(activeOrders, currentPrice);
+
+        for (const p of activeOrders) {
+            const isNearest = (p === below || p === above);
+            const color = isNearest ? 'rgba(255, 165, 0, 0.9)' : 'rgba(255, 165, 0, 0.4)';
+            const width = isNearest ? 2.5 : 1.5;
+            const dash = isNearest ? 'longdash' : 'dash';
+            shapes.push(shapeForY(p, color, width, dash));
+            yTicksVals.push(p);
+        }
+    } else { // 'grid' mode is the default
+        const allLevels = buildAllLevels();
+        const { below, above } = nearestBracket(allLevels, currentPrice);
+        const activeOrderPrices = new Set(OPEN_ORDERS_RAW.map(o => o.price));
+
+        for (const y of allLevels) {
+            if (y === GRID_MIN || y === GRID_MAX) continue;
+            
+            // Highlight only if the nearest level is also an active order
+            const isNearestAndActive = 
+                (y === below && activeOrderPrices.has(y)) || 
+                (y === above && activeOrderPrices.has(y));
+
+            const isBuy = (y <= (currentPrice ?? 0));
+            const color = isBuy ? 'rgba(46, 204, 113, 0.6)' : 'rgba(243, 156, 18, 0.6)';
+            const width = isNearestAndActive ? 2.5 : 1;
+            const dash = isNearestAndActive ? 'longdash' : 'dash';
+            shapes.push(shapeForY(y, color, width, dash));
+            yTicksVals.push(y);
+        }
+    }
+
+    // Finalize ticks and update layout
+    yTicksVals = [...new Set(yTicksVals)].sort((a, b) => a - b);
+    const yTicksText = yTicksVals.map(v => fmt(v, 6));
+
+    Plotly.relayout('chart', {
+        shapes: shapes,
+        'yaxis.tickmode': 'array',
+        'yaxis.tickvals': yTicksVals,
+        'yaxis.ticktext': yTicksText,
+    });
+}
+
+// Handles switching between chart modes
+function setChartMode(mode) {
+    showGridEl.checked = (mode === 'grid');
+    showActiveEl.checked = (mode === 'active');
+    showLatEl.checked = (mode === 'latitudes');
+    localStorage.setItem('chartMode', mode);
+    updateChart();
+}
+
+// This function will be called during initialization to set up event listeners
+function setupChartControls() {
+    showGridEl.addEventListener('change', () => { if(showGridEl.checked) setChartMode('grid'); });
+    showActiveEl.addEventListener('change', () => { if(showActiveEl.checked) setChartMode('active'); });
+    showLatEl.addEventListener('change', () => { if(showLatEl.checked) setChartMode('latitudes'); });
+
+    // Restore saved mode on page load
+    const savedMode = localStorage.getItem('chartMode') || 'grid';
+    setChartMode(savedMode);
+}
+
+/* ====== SSE ====== */
+window.__currentPrice = null;
+
 function startSSE(){
   try{
     const es = new EventSource('/stream');
+
+    // live price ticks
     es.addEventListener('tick', async ev=>{
       try{
         const j = JSON.parse(ev.data);
-        if(j && typeof j.p === 'number'){
-          document.getElementById('priceVal').textContent = fmt6(j.p);
-          const t = new Date(j.t);
-          _lastLivePrice = j.p;
-          if (!_chartReady){
+        
+        // Validate tick data structure
+        if (!j || typeof j !== 'object') {
+          console.warn('Invalid tick data structure:', j);
+          return;
+        }
+        
+        if (typeof j.p !== 'number' || !isFinite(j.p)) {
+          console.warn('Invalid price in tick data:', j.p);
+          return;
+        }
+        
+        if (!j.t) {
+          console.warn('Missing timestamp in tick data:', j);
+          return;
+        }
+
+        // Update price display
+        const priceEl = document.getElementById('priceVal');
+        if (priceEl) {
+          priceEl.textContent = fmt(j.p, 6);
+        }
+        
+        const t = new Date(j.t);
+        if (isNaN(t.getTime())) {
+          console.warn('Invalid timestamp in tick data:', j.t);
+          return;
+        }
+        
+        window.__currentPrice = Number(j.p);
+
+        const chartEl = document.getElementById('chart');
+        if (!chartEl) {
+          console.warn('Chart element not found for tick update');
+          return;
+        }
+
+        if (!_chartReady){
+          console.log('Chart not ready, initializing with tick data...');
+          try {
+            const levels = buildAllLevels();
+            const yTicksVals = levels;
+            const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
+            
             await Plotly.newPlot('chart',
-              [{ x:[t], y:[j.p], mode:'lines', name:'DOGE/USDT' }],
-              { margin:{l:60,r:20,t:10,b:40},
-                xaxis:{ title:'Time', tickformat:"%d/%m/%Y %H:%M", hoverformat:"%d/%m/%Y %H:%M:%S" },
-                yaxis:{ title:{text:'Price (USDT)', standoff:14}, tickformat:".6f", automargin:true, ticklabelposition:"outside", tickfont:{size:11}},
-                paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)' },
+              [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
+              { margin:{l:80,r:20,t:10,b:50},
+                xaxis:{ 
+                  title: { text: 'Time', standoff: 25 },
+                  showgrid:false, tickformat:"%d/%m<br><i style='font-size:0.8em'>(%H:00)</i>", hoverformat:"%d/%m/%Y %H:%M:%S" 
+                },
+                yaxis:{
+                  title:{
+                    text:'Price (USDT)',
+                    standoff: 40
+                  },
+                  showgrid:false,
+                  tickmode: (yTicksVals.length? 'array':'auto'),
+                  tickvals: (yTicksVals.length? yTicksVals: undefined),
+                  ticktext: (yTicksVals.length? yTicksText: undefined),
+                  hoverformat: ".6f"
+                },
+                paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+                shapes: [] },
               { displayModeBar:false });
             _chartReady = true;
-          } else {
-            try {
-              Plotly.extendTraces('chart', {x:[[t]], y:[[j.p]]}, [0], 10000);
-            } catch (e) {
-              try{
-                await Plotly.newPlot('chart',
-                  [{ x:[t], y:[j.p], mode:'lines', name:'DOGE/USDT' }],
-                  { margin:{l:60,r:20,t:10,b:40},
-                    xaxis:{ title:'Time', tickformat:"%d/%m/%Y %H:%M", hoverformat:"%d/%m/%Y %H:%M:%S" },
-                    yaxis:{ title:{text:'Price (USDT)', standoff:14}, tickformat:".6f", automargin:true, ticklabelposition:"outside", tickfont:{size:11}},
-                    paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)' },
-                  { displayModeBar:false });
-                _chartReady = true;
-              }catch(_){}
+            updateChart();
+            updateLastUpdated();
+            console.log('Chart initialized with tick data');
+          } catch (initError) {
+            console.error('Failed to initialize chart with tick data:', initError);
+            showChartError(`Failed to initialize chart: ${initError.message || 'Unknown error'}`);
+            return;
+          }
+        } else {
+          // Try to extend existing chart
+          try {
+            Plotly.extendTraces('chart', {x:[[t]], y:[[j.p]]}, [0], 10000);
+          } catch (extendError) {
+            console.warn('Failed to extend traces, recreating chart:', extendError);
+            
+            // Fallback: recreate chart with new data point
+            try{
+              const levels = buildAllLevels();
+              const yTicksVals = levels;
+              const yTicksText = levels.map(v => fmt(v, 6));
+              
+              await Plotly.newPlot('chart',
+                [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
+                { margin:{l:80,r:20,t:10,b:50},
+                  xaxis:{ 
+                    title: { text: 'Time', standoff: 25 },
+                    showgrid:false, tickformat:"%d/%m<br><i style='font-size:0.8em'>(%H:00)</i>", hoverformat:"%d/%m/%Y %H:%M:%S" 
+                  },
+                  yaxis:{
+                    title:{
+                      text:'Price (USDT)',
+                      standoff: 40
+                    },
+                    showgrid:false,
+                    tickmode: (yTicksVals.length? 'array':'auto'),
+                    tickvals: (yTicksVals.length? yTicksVals: undefined),
+                    ticktext: (yTicksVals.length? yTicksText: undefined),
+                    hoverformat: ".6f"
+                  },
+                  paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+                  shapes: [] },
+                { displayModeBar:false });
+              _chartReady = true;
+              updateChart();
+              updateLastUpdated();
+              console.log('Chart recreated successfully');
+            }catch(recreateError){
+              console.error('Failed to recreate chart:', recreateError);
+              showChartError(`Chart update failed: ${recreateError.message || 'Unknown error'}`);
+              return;
             }
           }
-          // refresh grid shapes position relative to live price
-          updateGridLayersOnChart(j.p);
         }
+
+        // Update chart lines based on new price
+        updateChart();
+        updateLastUpdated();
+        
+      }catch(e){
+        console.error('Error processing tick event:', e);
+      }
+    });
+
+    // live stats events (after file change)
+    es.addEventListener('stats', ev=>{
+      try{
+        const s = JSON.parse(ev.data);
+        // עדכון כרטיסי רווח
+        setText('profitVal', s.profit_usd ?? 0, 2);
+        setText('profitRealizedVal', s.realized_profit_usd ?? 0, 2);
+        setText('profitUnrealizedVal', s.unrealized_profit_usd ?? 0, 2);
+        setText('profitGridVal', s.grid_profit_usd ?? 0, 2);
+        setText('feesVal', s.fees_usd ?? 0, 2);
+        setText('profitPctVal', s.profit_pct ?? 0, 2);
+
+        const trigger = (s.split_trigger_usd!=null) ? s.split_trigger_usd : SPLIT_TRIGGER_ENV;
+        updateProfitWithTrigger(s.profit_usd ?? 0, trigger);
+        updateLastUpdated();
       }catch(e){}
     });
+
   }catch(e){}
 }
 
-/* ===== Open Orders (sort/filter + counts + highlight edge rows) ===== */
+/* ===== Open/History tables with counts & sort/filter ===== */
 let OPEN_ORDERS_RAW = [];
+let HIST_ORDERS_RAW = [];
+window.__gridLevels = [];
+window.__lower_bound = null;
+window.__upper_bound = null;
 
 function sortBy(arr, key, dir){
   const m = dir === 'asc' ? 1 : -1;
@@ -780,20 +1267,9 @@ function textFilter(arr, text){
     (o.side||'').toLowerCase().includes(q) ||
     String(o.price).toLowerCase().includes(q) ||
     String(o.amount).toLowerCase().includes(q) ||
-    String(o.value_usdt).toLowerCase().includes(q)
+    String(o.value_usdt).toLowerCase().includes(q) ||
+    (o.status? String(o.status).toLowerCase().includes(q): false)
   );
-}
-
-function computeLevelsFromOrders(orders){
-  const buys = [];
-  const sells = [];
-  for (const o of orders){
-    const p = Number(o.price||0);
-    if (!isFinite(p) || p<=0) continue;
-    if ((o.side||'').toLowerCase()==='buy') buys.push(p);
-    else if ((o.side||'').toLowerCase()==='sell') sells.push(p);
-  }
-  return { buys: uniqSorted(buys), sells: uniqSorted(sells) };
 }
 
 function renderOpenOrders(){
@@ -805,80 +1281,73 @@ function renderOpenOrders(){
   let rows = textFilter(OPEN_ORDERS_RAW, q);
   rows = sortBy(rows, sortKey, sortDir);
 
-  // find edge rows around current price (nearest buy below, nearest sell above)
-  let edgeBuyIndex = -1, edgeSellIndex = -1;
-  if (_lastLivePrice!=null){
-    let maxBelow=-Infinity, minAbove=Infinity;
-    let idxBelow=-1, idxAbove=-1;
-    for (let i=0;i<rows.length;i++){
-      const o = rows[i];
-      const p = Number(o.price||0);
-      if (!isFinite(p) || p<=0) continue;
-      const s = (o.side||'').toLowerCase();
-      if (s==='buy' && p<=_lastLivePrice && p>maxBelow){ maxBelow=p; idxBelow=i; }
-      if (s==='sell' && p>=_lastLivePrice && p<minAbove){ minAbove=p; idxAbove=i; }
-    }
-    edgeBuyIndex = idxBelow;
-    edgeSellIndex = idxAbove;
+  document.getElementById('openCount').textContent = `(${rows.length})`;
+
+  // Find nearest buy and sell orders to current price
+  const currentPrice = window.__currentPrice;
+  let nearestBuy = null, nearestSell = null;
+  let nearestBuyDist = Infinity, nearestSellDist = Infinity;
+  
+  if (currentPrice && !isNaN(currentPrice)) {
+    rows.forEach(o => {
+      const price = parseFloat(o.price);
+      if (!isFinite(price)) return;
+      
+      if (o.side === 'buy' && price <= currentPrice) {
+        const dist = currentPrice - price;
+        if (dist < nearestBuyDist) {
+          nearestBuyDist = dist;
+          nearestBuy = o;
+        }
+      } else if (o.side === 'sell' && price >= currentPrice) {
+        const dist = price - currentPrice;
+        if (dist < nearestSellDist) {
+          nearestSellDist = dist;
+          nearestSell = o;
+        }
+      }
+    });
   }
 
-  for(let i=0;i<rows.length;i++){
-    const o = rows[i];
+  rows.forEach((o,idx)=>{
     const tr = document.createElement('tr');
-    if (i===edgeBuyIndex || i===edgeSellIndex) tr.classList.add('row-emph');
     tr.innerHTML = `
       <td>${fmtDateTimeLocal(o.time)}</td>
       <td><span class="pill ${o.side==='buy'?'buy':'sell'}">${o.side ?? '—'}</span></td>
-      <td class="mono">${fmt6(o.price)}</td>
+      <td class="mono">${fmt(o.price, 6)}</td>
       <td class="mono">${fmt(o.amount, 2)}</td>
       <td class="mono">${fmt2(o.value_usdt)}</td>`;
+    
+    // Highlight nearest buy or sell order instead of first 2 rows
+    if (o === nearestBuy || o === nearestSell) {
+      tr.className = 'highlight-order';
+    }
+    
     tb.appendChild(tr);
-  }
+  });
 }
 
 async function loadOpenOrders(){
   const note = document.getElementById('openNote');
-  const ttl = document.getElementById('ttlOpen');
   try{
     const r = await fetch('/api/open_orders');
     const j = await r.json();
     if(j.ok && Array.isArray(j.orders)){
       OPEN_ORDERS_RAW = j.orders;
-      // counts
-      document.getElementById('openCountVal').textContent = String(j.orders.length);
-      ttl.textContent = `Open Orders (${j.orders.length})`;
-
       note.textContent = j.orders.length? '' : 'No open orders.';
       renderOpenOrders();
-
-      // rebuild grid levels from orders and update chart shapes & ticks
-      _gridLevelsFromOrders = computeLevelsFromOrders(j.orders);
-      updateYAxisTicksFromLevels(_gridLevelsFromOrders);
-      updateGridLayersOnChart(_lastLivePrice ?? 0);
     }else{
       note.textContent = j.error || 'Auth required (API key/secret).';
       OPEN_ORDERS_RAW = [];
       renderOpenOrders();
-      _gridLevelsFromOrders = {buys:[], sells:[]};
-      updateYAxisTicksFromLevels(_gridLevelsFromOrders);
-      updateGridLayersOnChart(_lastLivePrice ?? 0);
-      ttl.textContent = `Open Orders`;
-      document.getElementById('openCountVal').textContent = "0";
     }
   }catch(e){
     note.textContent = 'Failed to load.';
     OPEN_ORDERS_RAW = [];
     renderOpenOrders();
-    _gridLevelsFromOrders = {buys:[], sells:[]};
-    updateYAxisTicksFromLevels(_gridLevelsFromOrders);
-    updateGridLayersOnChart(_lastLivePrice ?? 0);
-    ttl.textContent = `Open Orders`;
-    document.getElementById('openCountVal').textContent = "0";
   }
+  updateLastUpdated();
 }
-
-/* ===== History Orders (sort/filter + counts) ===== */
-let HIST_ORDERS_RAW = [];
 
 function renderHistOrders(){
   const tb = document.querySelector('#histTbl tbody'); tb.innerHTML='';
@@ -889,13 +1358,15 @@ function renderHistOrders(){
   let rows = textFilter(HIST_ORDERS_RAW, q);
   rows = sortBy(rows, sortKey, sortDir);
 
+  document.getElementById('histCount').textContent = `(${rows.length})`;
+
   for(const o of rows){
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${fmtDateTimeLocal(o.time)}</td>
       <td><span class="pill ${o.side==='buy'?'buy':'sell'}">${o.side ?? '—'}</span></td>
       <td>${o.status ?? '—'}</td>
-      <td class="mono">${fmt6(o.price)}</td>
+      <td class="mono">${fmt(o.price, 6)}</td>
       <td class="mono">${fmt(o.amount, 2)}</td>
       <td class="mono">${fmt2(o.value_usdt)}</td>`;
     tb.appendChild(tr);
@@ -904,7 +1375,6 @@ function renderHistOrders(){
 
 async function loadHistoryOrders(){
   const note = document.getElementById('histNote');
-  const ttl = document.getElementById('ttlHist');
   try{
     const r = await fetch('/api/order_history');
     const j = await r.json();
@@ -912,60 +1382,99 @@ async function loadHistoryOrders(){
       HIST_ORDERS_RAW = j.orders;
       note.textContent = j.orders.length? '' : 'No history to show.';
       renderHistOrders();
-      document.getElementById('histCountVal').textContent = String(j.orders.length);
-      ttl.textContent = `Orders History (${j.orders.length})`;
     }else{
       note.textContent = j.error || 'Auth required (API key/secret).';
       HIST_ORDERS_RAW = [];
       renderHistOrders();
-      document.getElementById('histCountVal').textContent = "0";
-      ttl.textContent = `Orders History`;
     }
   }catch(e){
     note.textContent = 'Failed to load.';
     HIST_ORDERS_RAW = [];
     renderHistOrders();
-    document.getElementById('histCountVal').textContent = "0";
-    ttl.textContent = `Orders History`;
   }
+  updateLastUpdated();
 }
 
-/* ===== wire controls ===== */
+/* wire controls + showGrid local state */
 function wireControls(){
-  const ids = ['openSortBy','openSortDir','openFilter','histSortBy','histSortDir','histFilter'];
-  ids.forEach(id=>{
+  function bindPersist(id, evt, handler){
     const el = document.getElementById(id);
-    if (!el) return;
-    const handler = id.startsWith('open') ? renderOpenOrders : renderHistOrders;
-    el.addEventListener('input', handler);
-    el.addEventListener('change', handler);
-  });
+    if(!el) return;
+    const key = 'ui.'+id;
+    try{
+      const saved = localStorage.getItem(key);
+      if(saved!==null) el.value = saved;
+    }catch(_){}
+    el.addEventListener(evt, ()=>{
+      try{ localStorage.setItem(key, el.value); }catch(_){}
+      handler();
+    });
+  }
+  bindPersist('openSortBy','change', renderOpenOrders);
+  bindPersist('openSortDir','change', renderOpenOrders);
+  bindPersist('openFilter','input', renderOpenOrders);
+  bindPersist('histSortBy','change', renderHistOrders);
+  bindPersist('histSortDir','change', renderHistOrders);
+  bindPersist('histFilter','input', renderHistOrders);
 
-  // small chevron for collapsibles (visual only)
-  document.querySelectorAll('details').forEach(d=>{
-    const s = d.querySelector('summary .chev');
-    if (!s) return;
-    const upd = ()=>{ s.textContent = d.open ? "▾" : "▸"; };
-    d.addEventListener('toggle', upd);
-    upd();
+  // Setup chart view controls
+  setupChartControls();
+
+  const refreshBtn = document.getElementById('btnRefresh');
+  if(refreshBtn) refreshBtn.addEventListener('click', ()=>{
+    loadStats(); loadOpenOrders(); loadHistoryOrders(); loadHistory(); updateLastUpdated();
   });
+  const stopBtn = document.getElementById('btnStop');
+  if(stopBtn) stopBtn.addEventListener('click', ()=>{ fetch('/api/stop_bot', {method:'POST'}); });
+  const resumeBtn = document.getElementById('btnResume');
+  if(resumeBtn) resumeBtn.addEventListener('click', ()=>{ fetch('/api/resume_bot', {method:'POST'}); });
+  const cancelBtn = document.getElementById('btnCancel');
+  if(cancelBtn) cancelBtn.addEventListener('click', ()=>{ fetch('/api/cancel_all_orders', {method:'POST'}); });
+
+  // Persist collapsible states for dashboard components
+  function persistCollapsibleState(){
+    ['chartBox', 'openBox', 'histBox'].forEach(id => {
+      const element = document.getElementById(id);
+      if (!element) return;
+      
+      const key = `ui.${id}.open`;
+      // Restore state
+      try {
+        const saved = localStorage.getItem(key);
+        if (saved !== null) {
+          element.open = JSON.parse(saved);
+        }
+      } catch(_) {}
+      
+      // Save state on toggle
+      element.addEventListener('toggle', () => {
+        try {
+          localStorage.setItem(key, JSON.stringify(element.open));
+        } catch(_) {}
+      });
+    });
+  }
+  
+  persistCollapsibleState();
+
+  renderOpenOrders();
+  renderHistOrders();
 }
 
-/* ===== boot ===== */
 async function boot(){
-  await loadStats();
-  await loadSplitState();
-  await loadHistory();    // load chart first
-  startSSE();             // then live updates
-  await loadOpenOrders(); // this will also set grid levels + ticks
-  await loadHistoryOrders();
+  showGridEl = document.getElementById('showGrid');
+  showActiveEl = document.getElementById('showActiveLayers');
+  showLatEl = document.getElementById('showLat');
   wireControls();
-
-  // periodic refresh
-  setInterval(loadStats, 10000);
-  setInterval(loadSplitState, 10000);
-  setInterval(loadOpenOrders, 15000);
-  setInterval(loadHistoryOrders, 20000);
+  await loadStats();
+  await loadHistory();    // טוען היסטוריה לפני הזרם
+  startSSE();             // ואז סטרים חי למחיר + סטטיסטיקות
+  await loadOpenOrders();
+  await loadHistoryOrders();
+  // רענונים תקופתיים (fallback)
+  setInterval(loadStats, 15000);
+  setInterval(loadOpenOrders, 20000);
+  setInterval(loadHistoryOrders, 25000);
 }
 
 document.addEventListener('DOMContentLoaded', boot);
@@ -976,13 +1485,20 @@ document.addEventListener('DOMContentLoaded', boot);
 
 @app.get("/")
 def index():
-    return render_template_string(
+    html_content = render_template_string(
         HTML,
         pair=PAIR,
         grid_min=GRID_MIN,
         grid_max=GRID_MAX,
         grid_step_pct=GRID_STEP_PCT,
+        split_trigger_env=SPLIT_TRIGGER_ENV,
     )
+    response = make_response(html_content)
+    # Add cache-busting headers
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 # =========================================================
 # MAIN
@@ -1005,5 +1521,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
