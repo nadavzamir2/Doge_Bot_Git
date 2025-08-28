@@ -232,6 +232,7 @@ def _sse_generator():
                 sse_stats = {
                     "profit_usd": float(profit_live or 0.0),
                     "split_trigger_usd": float(split_trigger or 0.0),
+                    "splits_count": int(stats.get("splits_count", 0) or 0),
                     "realized_profit_usd": float(stats.get("realized_profit_usd", 0.0) or 0.0),
                     "unrealized_profit_usd": float(stats.get("unrealized_profit_usd", 0.0) or 0.0),
                     "grid_profit_usd": float(stats.get("grid_profit_usd", 0.0) or 0.0),
@@ -832,16 +833,19 @@ function showChartError(message) {
 function setText(id, val, digits=2){
   const el = document.getElementById(id);
   if (!el) return;
-  if (val === null || val === undefined || isNaN(val)) el.textContent = '0.00';
-  else el.textContent = Number(val).toFixed(digits);
+  if (val === null || val === undefined || isNaN(val)) {
+    el.textContent = digits === 0 ? '0' : '0.00';
+  } else {
+    el.textContent = digits === 0 ? String(Math.round(val)) : Number(val).toFixed(digits);
+  }
 }
 
-function updateProfitWithTrigger(profit, trigger){
+function updateProfitWithTrigger(profit, splitsCount){
   const el = document.getElementById('profitTriggerNote');
   if (!el) return;
   const p = (profit==null || isNaN(profit)) ? 0 : Number(profit);
-  const t = (trigger==null || isNaN(trigger)) ? 0 : Number(trigger);
-  el.textContent = `(${p.toFixed(2)} / ${t.toFixed(2)})`;
+  const s = (splitsCount==null || isNaN(splitsCount)) ? 0 : Math.round(Number(splitsCount));
+  el.textContent = `(${p.toFixed(2)} / ${s})`;
 }
 
 /* ===== stats (polling fallback) ===== */
@@ -861,7 +865,7 @@ async function loadStats(){
     setText('feesVal', j.fees_usd ?? 0, 2);
     setText('profitPctVal', j.profit_pct ?? 0, 2);
 
-    updateProfitWithTrigger(j.profit_usd ?? 0, j.split_trigger_usd ?? SPLIT_TRIGGER_ENV);
+    updateProfitWithTrigger(j.profit_usd ?? 0, j.splits_count ?? 0);
     updateLastUpdated();
   }catch(e){}
 }
@@ -1062,7 +1066,33 @@ async function updateChart() {
 
     // Finalize ticks and update layout
     yTicksVals = [...new Set(yTicksVals)].sort((a, b) => a - b);
-    const yTicksText = yTicksVals.map(v => fmt(v, 6));
+    let yTicksText = yTicksVals.map(v => fmt(v, 6));
+    
+    // For active layers mode, make nearest layer ticks bold and black
+    if (mode === 'active') {
+        const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).sort((a, b) => a - b);
+        const { below, above } = nearestBracket(activeOrders, currentPrice);
+        
+        yTicksText = yTicksVals.map(v => {
+            const isNearest = (v === below || v === above);
+            if (isNearest) {
+                return `<b style="color: black">${fmt(v, 6)}</b>`;
+            }
+            return fmt(v, 6);
+        });
+    } else if (mode === 'grid') {
+        // For grid mode, show exact grid tick numbers with consistent formatting
+        const allLevels = buildAllLevels();
+        yTicksText = yTicksVals.map(v => {
+            // Check if this is an original grid level and find its index
+            const gridIndex = allLevels.findIndex(level => Math.abs(level - v) < 1e-10);
+            if (gridIndex >= 0) {
+                // Show grid levels with tick number annotation
+                return `${fmt(v, 6)} [#${gridIndex + 1}]`;
+            }
+            return fmt(v, 6);
+        });
+    }
 
     Plotly.relayout('chart', {
         shapes: shapes,
@@ -1238,14 +1268,15 @@ function startSSE(){
         const s = JSON.parse(ev.data);
         // עדכון כרטיסי רווח
         setText('profitVal', s.profit_usd ?? 0, 2);
+        setText('splitsVal', s.splits_count ?? 0, 0);
         setText('profitRealizedVal', s.realized_profit_usd ?? 0, 2);
         setText('profitUnrealizedVal', s.unrealized_profit_usd ?? 0, 2);
         setText('profitGridVal', s.grid_profit_usd ?? 0, 2);
         setText('feesVal', s.fees_usd ?? 0, 2);
         setText('profitPctVal', s.profit_pct ?? 0, 2);
 
-        const trigger = (s.split_trigger_usd!=null) ? s.split_trigger_usd : SPLIT_TRIGGER_ENV;
-        updateProfitWithTrigger(s.profit_usd ?? 0, trigger);
+        const splitsCount = (s.splits_count!=null) ? s.splits_count : 0;
+        updateProfitWithTrigger(s.profit_usd ?? 0, splitsCount);
         updateLastUpdated();
       }catch(e){}
     });
