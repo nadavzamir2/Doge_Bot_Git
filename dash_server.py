@@ -35,6 +35,9 @@ import ccxt
 # =========================================================
 
 ENV_FILE = os.path.expanduser("~/doge_bot/.env")
+# Also try loading from current directory if the primary location doesn't exist
+if not os.path.exists(ENV_FILE):
+    ENV_FILE = ".env"
 load_dotenv(ENV_FILE)
 
 BINANCE_REGION = os.getenv("BINANCE_REGION", "com").strip().lower()  # 'com' or 'us'
@@ -56,6 +59,11 @@ def _env_float(name: str):
 GRID_MIN = _env_float("GRID_MIN")
 GRID_MAX = _env_float("GRID_MAX")
 GRID_STEP_PCT = _env_float("GRID_STEP_PCT")
+
+# Initial investment amounts
+BASE_ORDER_USD = _env_float("BASE_ORDER_USD") or 0.0
+MAX_USD_FOR_CYCLE = _env_float("MAX_USD_FOR_CYCLE") or 0.0
+SPLIT_CHUNK_USD = _env_float("SPLIT_CHUNK_USD") or 4.0
 
 # Profit split trigger fallback from env (if not in stats file)
 SPLIT_TRIGGER_ENV = (
@@ -275,6 +283,45 @@ def history_endpoint():
             return {"data": test_data}
         return {"data": list(PRICE_WINDOW)}
 
+@app.get("/api/initial_investments")
+def api_initial_investments():
+    """Get initial investment amounts from state.json and environment variables."""
+    try:
+        # Try multiple possible locations for state.json
+        state_paths = [
+            pathlib.Path("state.json"),  # Current directory
+            pathlib.Path.home() / "doge_bot" / "data" / "state.json",  # Data directory
+            DATA_DIR / "state.json"  # DATA_DIR location
+        ]
+        
+        initial_doge = 0.0
+        
+        for state_file in state_paths:
+            if state_file.exists():
+                try:
+                    with open(state_file, 'r') as f:
+                        state = json.load(f)
+                        # Calculate total DOGE from buy fills
+                        buy_fills = state.get("buy_fills", {})
+                        for fill in buy_fills.values():
+                            amount = float(fill.get("amount", 0))
+                            initial_doge += amount
+                    break  # Found and processed the file
+                except Exception as e:
+                    print(f"[WARN] Failed to read {state_file}: {e}")
+                    continue
+        
+        return {
+            "initial_usdt": float(MAX_USD_FOR_CYCLE or 0.0),
+            "initial_doge": float(initial_doge),
+        }
+    except Exception as e:
+        return {
+            "initial_usdt": float(MAX_USD_FOR_CYCLE or 0.0),
+            "initial_doge": 0.0,
+            "error": str(e)
+        }
+
 @app.get("/api/stats")
 def api_stats():
     stats = _read_stats_file()
@@ -473,7 +520,7 @@ HTML = r"""<!doctype html>
     z-index: 1000;
     pointer-events: none;
   }
-  .cards { display:grid; grid-template-columns: repeat(5, minmax(160px,1fr)); gap:12px; margin-bottom:16px; }
+  .cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap:12px; margin-bottom:16px; }
   .card { background:var(--card); border:1px solid var(--grid); border-radius:12px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
   .card h3 { margin:0 0 6px; font-size:13px; color:var(--muted); font-weight:600; }
   .card .v { font-size:20px; font-weight:700; }
@@ -527,11 +574,22 @@ HTML = r"""<!doctype html>
 
     <!-- Top info cards -->
     <div class="cards">
+      <!-- New info boxes for initial investments -->
+      <div class="card">
+        <h3>Initial USDT Invested</h3>
+        <div id="initialUsdtVal" class="v mono">—</div>
+      </div>
+
+      <div class="card">
+        <h3>Initial DOGE Invested</h3>
+        <div id="initialDogeVal" class="v mono">—</div>
+      </div>
+
       <!-- Bot Range card -->
       <div class="card">
         <h3>Bot Range</h3>
         <div id="rangeVal" class="v mono">—</div>
-        <div class="subnote">Layer spacing: <span id="spacingVal">—</span>%</div>
+        <div class="subnote">Layer spacing: <span id="spacingVal">—</span>% • <span id="layersCountVal">—</span> layers</div>
       </div>
 
       <div class="card"><h3>Current Price</h3><div id="priceVal" class="v mono">—</div></div>
@@ -540,7 +598,7 @@ HTML = r"""<!doctype html>
       <div class="card">
         <h3>Total Profit (USD)</h3>
         <div id="profitVal" class="v mono">0.00</div>
-        <div class="subnote" id="profitTriggerNote">(0.00 / 0.00)</div>
+        <div class="subnote" id="profitTriggerNote">(0.00 / 4.0$ chunk trigger)</div>
       </div>
 
       <div class="card"><h3>Sell Trades Count</h3><div id="sellTradesVal" class="v mono">0</div></div>
@@ -692,6 +750,9 @@ var showGridEl, showActiveEl, showLatEl;
 
 const PAIR = {{ pair|tojson }};
 const SPLIT_TRIGGER_ENV = {{ split_trigger_env|tojson }};
+const SPLIT_CHUNK_USD = {{ split_chunk_usd|tojson }};
+const BASE_ORDER_USD = {{ base_order_usd|tojson }};
+const MAX_USD_FOR_CYCLE = {{ max_usd_for_cycle|tojson }};
 document.getElementById('pair').textContent = PAIR;
 
 /* range & spacing from server-side (env), if provided */
@@ -702,13 +763,34 @@ const GRID_STEP_PCT = {{ grid_step_pct|tojson }};
 (function setRangeCard(){
   const r = document.getElementById('rangeVal');
   const s = document.getElementById('spacingVal');
+  const l = document.getElementById('layersCountVal');
   if (GRID_MIN != null && GRID_MAX != null) {
     r.textContent = `${Number(GRID_MIN).toFixed(6).replace(/^\./, '0.')} – ${Number(GRID_MAX).toFixed(6).replace(/^\./, '0.')}`;
   } else {
     r.textContent = '—';
   }
-  if (GRID_STEP_PCT != null) s.textContent = String(Number(GRID_STEP_PCT));
-  else s.textContent = '—';
+  if (GRID_STEP_PCT != null) {
+    s.textContent = String(Number(GRID_STEP_PCT));
+    // Calculate number of layers
+    if (GRID_MIN != null && GRID_MAX != null) {
+      const levels = buildAllLevels();
+      l.textContent = String(levels.length);
+    } else {
+      l.textContent = '—';
+    }
+  } else {
+    s.textContent = '—';
+    l.textContent = '—';
+  }
+})();
+
+(function setInitialInvestments(){
+  // Initial investments will be loaded via API in loadInitialInvestments()
+  const usdtEl = document.getElementById('initialUsdtVal');
+  const dogeEl = document.getElementById('initialDogeVal');
+  
+  if (usdtEl) usdtEl.textContent = '—';
+  if (dogeEl) dogeEl.textContent = '—';
 })();
 
 /* helpers */
@@ -847,8 +929,9 @@ function updateProfitWithTrigger(profit, actualSplitsCount){
   const el = document.getElementById('profitTriggerNote');
   if (!el) return;
   const p = (profit==null || isNaN(profit)) ? 0 : Number(profit);
-  const s = (actualSplitsCount==null || isNaN(actualSplitsCount)) ? 0 : Math.round(Number(actualSplitsCount));
-  el.textContent = `(${p.toFixed(2)} / ${s} actual splits)`;
+  // Use SPLIT_CHUNK_USD from environment variable
+  const chunkAmount = SPLIT_CHUNK_USD || 4.0;
+  el.textContent = `(${p.toFixed(2)} / ${chunkAmount}$ chunk trigger)`;
 }
 
 /* ===== stats (polling fallback) ===== */
@@ -872,6 +955,26 @@ async function loadStats(){
     updateProfitWithTrigger(j.profit_usd ?? 0, j.actual_splits_count ?? 0);
     updateLastUpdated();
   }catch(e){}
+}
+
+/* ===== Load initial investments ===== */
+async function loadInitialInvestments(){
+  try{
+    const r = await fetch('/api/initial_investments');
+    const j = await r.json();
+    
+    const usdtEl = document.getElementById('initialUsdtVal');
+    const dogeEl = document.getElementById('initialDogeVal');
+    
+    if (usdtEl) {
+      usdtEl.textContent = j.initial_usdt > 0 ? Number(j.initial_usdt).toFixed(2) : '—';
+    }
+    if (dogeEl) {
+      dogeEl.textContent = j.initial_doge > 0 ? Number(j.initial_doge).toFixed(2) : '—';
+    }
+  }catch(e){
+    console.warn('Failed to load initial investments:', e);
+  }
 }
 
 /* ===== history + chart ===== */
@@ -1517,12 +1620,14 @@ async function boot(){
   showLatEl = document.getElementById('showLat');
   wireControls();
   await loadStats();
+  await loadInitialInvestments();
   await loadHistory();    // טוען היסטוריה לפני הזרם
   startSSE();             // ואז סטרים חי למחיר + סטטיסטיקות
   await loadOpenOrders();
   await loadHistoryOrders();
   // רענונים תקופתיים (fallback)
   setInterval(loadStats, 15000);
+  setInterval(loadInitialInvestments, 30000); // Refresh initial investments every 30s
   setInterval(loadOpenOrders, 20000);
   setInterval(loadHistoryOrders, 25000);
 }
@@ -1542,6 +1647,9 @@ def index():
         grid_max=GRID_MAX,
         grid_step_pct=GRID_STEP_PCT,
         split_trigger_env=SPLIT_TRIGGER_ENV,
+        split_chunk_usd=SPLIT_CHUNK_USD,
+        base_order_usd=BASE_ORDER_USD,
+        max_usd_for_cycle=MAX_USD_FOR_CYCLE,
     )
     response = make_response(html_content)
     # Add cache-busting headers
