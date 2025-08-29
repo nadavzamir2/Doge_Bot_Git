@@ -975,7 +975,8 @@ function setLoadingState(id) {
   cardLoadingStates.add(id);
   const el = document.getElementById(id);
   if (el) {
-    el.innerHTML = '<span class="loading-indicator"></span>';
+    // Make loading more visible with explicit text
+    el.innerHTML = '<span class="loading-indicator"></span> Loading...';
   }
 }
 
@@ -1049,8 +1050,13 @@ function initializeCardLoadingStates() {
 
 /* ===== stats (polling fallback) ===== */
 async function loadStats(){
+  // Show loading indicators for slow-loading cards
+  setLoadingState('profitVal');
+  setLoadingState('sellTradesVal');
+  
   try{
     const r = await fetch('/api/stats');
+    const j = await r.json();
     const j = await r.json();
     
     // Handle price separately since it uses a different format
