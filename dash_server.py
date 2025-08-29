@@ -650,22 +650,22 @@ HTML = r"""<!doctype html>
       <!-- Total Profit card with (profit/trigger) subnote -->
       <div class="card">
         <h3>Total Profit (USD)</h3>
-        <div id="profitVal" class="v mono">0.00</div>
-        <div class="subnote" id="profitTriggerNote">(0.00 / 4.0$ chunk trigger)</div>
+        <div id="profitVal" class="v mono">—</div>
+        <div class="subnote" id="profitTriggerNote">(— / 4.0$ chunk trigger)</div>
       </div>
 
-      <div class="card"><h3>Sell Trades Count</h3><div id="sellTradesVal" class="v mono">0</div></div>
-      <div class="card"><h3>Actual Splits Count</h3><div id="actualSplitsVal" class="v mono">0</div></div>
-      <div class="card"><h3>Converted to BNB (USD)</h3><div id="bnbVal" class="v mono">0.00</div></div>
+      <div class="card"><h3>Sell Trades Count</h3><div id="sellTradesVal" class="v mono">—</div></div>
+      <div class="card"><h3>Actual Splits Count</h3><div id="actualSplitsVal" class="v mono">—</div></div>
+      <div class="card"><h3>Converted to BNB (USD)</h3><div id="bnbVal" class="v mono">—</div></div>
     </div>
 
     <!-- EXTRA profit cards (values only; לא נוגעים בשאר) -->
     <div class="cards">
-      <div class="card"><h3>Realized Profit (USD)</h3><div id="profitRealizedVal" class="v mono">0.00</div></div>
-      <div class="card"><h3>Unrealized Profit (USD)</h3><div id="profitUnrealizedVal" class="v mono">0.00</div></div>
-      <div class="card"><h3>Grid Profit (USD)</h3><div id="profitGridVal" class="v mono">0.00</div></div>
-      <div class="card"><h3>Fees (USD)</h3><div id="feesVal" class="v mono">0.00</div></div>
-      <div class="card"><h3>Profit %</h3><div id="profitPctVal" class="v mono">0.00</div></div>
+      <div class="card"><h3>Realized Profit (USD)</h3><div id="profitRealizedVal" class="v mono">—</div></div>
+      <div class="card"><h3>Unrealized Profit (USD)</h3><div id="profitUnrealizedVal" class="v mono">—</div></div>
+      <div class="card"><h3>Grid Profit (USD)</h3><div id="profitGridVal" class="v mono">—</div></div>
+      <div class="card"><h3>Fees (USD)</h3><div id="feesVal" class="v mono">—</div></div>
+      <div class="card"><h3>Profit %</h3><div id="profitPctVal" class="v mono">—</div></div>
     </div>
 
     <div class="sections">
@@ -967,13 +967,43 @@ function showChartError(message) {
 }
 
 
+/* ===== Loading state management ===== */
+const cardLoadingStates = new Set();
+const initializedCards = new Set();
+
+function setLoadingState(id) {
+  cardLoadingStates.add(id);
+  const el = document.getElementById(id);
+  if (el) {
+    el.innerHTML = '<span class="loading-indicator"></span>';
+  }
+}
+
+function clearLoadingState(id) {
+  cardLoadingStates.delete(id);
+  initializedCards.add(id);
+}
+
+function isCardLoading(id) {
+  return cardLoadingStates.has(id);
+}
+
+function isCardInitialized(id) {
+  return initializedCards.has(id);
+}
+
 /* ===== Update profits cards ===== */
 function setText(id, val, digits=2){
   const el = document.getElementById(id);
   if (!el) return;
+  
+  // Clear loading state since we're setting data (even if null)
+  clearLoadingState(id);
+  
   if (val === null || val === undefined || isNaN(val)) {
-    el.textContent = digits === 0 ? '0' : '0.00';
+    el.textContent = '—';
   } else {
+    // Real value (including real zeros)
     el.textContent = digits === 0 ? String(Math.round(val)) : Number(val).toFixed(digits);
   }
 }
@@ -981,10 +1011,31 @@ function setText(id, val, digits=2){
 function updateProfitWithTrigger(profit, actualSplitsCount){
   const el = document.getElementById('profitTriggerNote');
   if (!el) return;
-  const p = (profit==null || isNaN(profit)) ? 0 : Number(profit);
+  const p = (profit==null || isNaN(profit)) ? null : Number(profit);
   // Use SPLIT_CHUNK_USD from environment variable
   const chunkAmount = SPLIT_CHUNK_USD || 4.0;
-  el.textContent = `(${p.toFixed(2)} / ${chunkAmount}$ chunk trigger)`;
+  
+  if (p === null) {
+    el.textContent = `(— / ${chunkAmount}$ chunk trigger)`;
+  } else {
+    el.textContent = `(${p.toFixed(2)} / ${chunkAmount}$ chunk trigger)`;
+  }
+}
+
+/* ===== Initialize loading states for all cards ===== */
+function initializeCardLoadingStates() {
+  // Set loading indicators for all data cards that should show loading initially
+  const cardIds = [
+    'priceVal', 'profitVal', 'sellTradesVal', 'actualSplitsVal', 'bnbVal',
+    'profitRealizedVal', 'profitUnrealizedVal', 'profitGridVal', 'feesVal', 'profitPctVal'
+  ];
+  
+  cardIds.forEach(id => {
+    // Only set loading for cards that haven't been initialized yet
+    if (!isCardInitialized(id)) {
+      setLoadingState(id);
+    }
+  });
 }
 
 /* ===== stats (polling fallback) ===== */
@@ -992,18 +1043,30 @@ async function loadStats(){
   try{
     const r = await fetch('/api/stats');
     const j = await r.json();
-    if('price' in j) document.getElementById('priceVal').textContent = fmt(j.price, 6);
-    document.getElementById('profitVal').textContent = fmt2(j.profit_usd);
-    document.getElementById('sellTradesVal').textContent = fmt0(j.sell_trades_count);
-    document.getElementById('actualSplitsVal').textContent = fmt0(j.actual_splits_count);
-    document.getElementById('bnbVal').textContent = fmt2(j.bnb_converted_usd);
+    
+    // Handle price separately since it uses a different format
+    if('price' in j && j.price !== null) {
+      const priceEl = document.getElementById('priceVal');
+      if (priceEl) {
+        clearLoadingState('priceVal');
+        priceEl.textContent = fmt(j.price, 6);
+      }
+    } else {
+      // Price is null/missing
+      setText('priceVal', null, 6);
+    }
+    
+    setText('profitVal', j.profit_usd, 2);
+    setText('sellTradesVal', j.sell_trades_count, 0);
+    setText('actualSplitsVal', j.actual_splits_count, 0);
+    setText('bnbVal', j.bnb_converted_usd, 2);
 
-    // EXTRA profits
-    setText('profitRealizedVal', j.realized_profit_usd ?? 0, 2);
-    setText('profitUnrealizedVal', j.unrealized_profit_usd ?? 0, 2);
-    setText('profitGridVal', j.grid_profit_usd ?? 0, 2);
-    setText('feesVal', j.fees_usd ?? 0, 2);
-    setText('profitPctVal', j.profit_pct ?? 0, 2);
+    // EXTRA profits - pass the actual values (including nulls)
+    setText('profitRealizedVal', j.realized_profit_usd, 2);
+    setText('profitUnrealizedVal', j.unrealized_profit_usd, 2);
+    setText('profitGridVal', j.grid_profit_usd, 2);
+    setText('feesVal', j.fees_usd, 2);
+    setText('profitPctVal', j.profit_pct, 2);
 
     updateProfitWithTrigger(j.profit_usd ?? 0, j.actual_splits_count ?? 0);
     updateLastUpdated();
@@ -1350,6 +1413,7 @@ function startSSE(){
         // Update price display
         const priceEl = document.getElementById('priceVal');
         if (priceEl) {
+          clearLoadingState('priceVal');
           priceEl.textContent = fmt(j.p, 6);
         }
         
@@ -1464,14 +1528,14 @@ function startSSE(){
       try{
         const s = JSON.parse(ev.data);
         // עדכון כרטיסי רווח
-        setText('profitVal', s.profit_usd ?? 0, 2);
-        setText('sellTradesVal', s.sell_trades_count ?? 0, 0);
-        setText('actualSplitsVal', s.actual_splits_count ?? 0, 0);
-        setText('profitRealizedVal', s.realized_profit_usd ?? 0, 2);
-        setText('profitUnrealizedVal', s.unrealized_profit_usd ?? 0, 2);
-        setText('profitGridVal', s.grid_profit_usd ?? 0, 2);
-        setText('feesVal', s.fees_usd ?? 0, 2);
-        setText('profitPctVal', s.profit_pct ?? 0, 2);
+        setText('profitVal', s.profit_usd, 2);
+        setText('sellTradesVal', s.sell_trades_count, 0);
+        setText('actualSplitsVal', s.actual_splits_count, 0);
+        setText('profitRealizedVal', s.realized_profit_usd, 2);
+        setText('profitUnrealizedVal', s.unrealized_profit_usd, 2);
+        setText('profitGridVal', s.grid_profit_usd, 2);
+        setText('feesVal', s.fees_usd, 2);
+        setText('profitPctVal', s.profit_pct, 2);
 
         const actualSplitsCount = (s.actual_splits_count!=null) ? s.actual_splits_count : 0;
         updateProfitWithTrigger(s.profit_usd ?? 0, actualSplitsCount);
@@ -1709,6 +1773,10 @@ async function boot(){
   showActiveEl = document.getElementById('showActiveLayers');
   showLatEl = document.getElementById('showLat');
   wireControls();
+  
+  // Initialize loading states for cards that start with dashes
+  initializeCardLoadingStates();
+  
   await loadStats();
   await loadInitialInvestments();
   await loadHistory();    // טוען היסטוריה לפני הזרם
