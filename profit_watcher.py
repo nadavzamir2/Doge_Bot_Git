@@ -207,8 +207,8 @@ def process_trades_sequence(trades: List[Dict[str, Any]], st: Dict[str, Any],
         elif side == "sell":
             pnl, matched = fifo_match_sell(inv, price, amount, fee_rate_each_side)
             realized_total += pnl
-            if matched > 0:
-                inc_sell_trades += 1  # Count sell trades that matched inventory
+            # Count all sell trades, not just those with matched inventory
+            inc_sell_trades += 1
 
         last_id = tid
 

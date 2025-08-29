@@ -1000,11 +1000,20 @@ function setText(id, val, digits=2){
   // Clear loading state since we're setting data (even if null)
   clearLoadingState(id);
   
-  if (val === null || val === undefined || isNaN(val)) {
-    el.textContent = '—';
+  // For Total Profit card, always show the data even if it's null/undefined
+  if (id === 'profitVal') {
+    if (val === null || val === undefined || isNaN(val)) {
+      el.textContent = '0.00';
+    } else {
+      el.textContent = digits === 0 ? String(Math.round(val)) : Number(val).toFixed(digits);
+    }
   } else {
-    // Real value (including real zeros)
-    el.textContent = digits === 0 ? String(Math.round(val)) : Number(val).toFixed(digits);
+    if (val === null || val === undefined || isNaN(val)) {
+      el.textContent = '—';
+    } else {
+      // Real value (including real zeros)
+      el.textContent = digits === 0 ? String(Math.round(val)) : Number(val).toFixed(digits);
+    }
   }
 }
 
@@ -1306,6 +1315,24 @@ async function updateChart() {
                 yTicksVals.push(y);
             }
         }
+        
+        // Check if purple boundary lines represent active layers and mark them with dashed lines
+        const activeOrderPrices = new Set(OPEN_ORDERS_RAW.map(o => o.price));
+        
+        // Add dashed line markings for active purple lines
+        if (GRID_MIN != null && activeOrderPrices.has(GRID_MIN)) {
+            // Add dashed lines at top and bottom edges of purple line
+            const offset = (GRID_MAX - GRID_MIN) * 0.001; // Small offset for visibility
+            shapes.push(shapeForY(GRID_MIN + offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
+            shapes.push(shapeForY(GRID_MIN - offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
+        }
+        
+        if (GRID_MAX != null && activeOrderPrices.has(GRID_MAX)) {
+            // Add dashed lines at top and bottom edges of purple line
+            const offset = (GRID_MAX - GRID_MIN) * 0.001; // Small offset for visibility
+            shapes.push(shapeForY(GRID_MAX + offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
+            shapes.push(shapeForY(GRID_MAX - offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
+        }
     } else if (mode === 'active') {
         const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).sort((a, b) => a - b);
         const { below, above } = nearestBracket(activeOrders, currentPrice);
@@ -1352,6 +1379,29 @@ async function updateChart() {
             // Just show the formatted value without [#] annotations
             return fmt(v, 6);
         });
+    }
+
+    // Add gray lines when price touches purple boundary lines (for all modes)
+    if (currentPrice != null && (GRID_MIN != null || GRID_MAX != null)) {
+        const tolerance = 0.000001; // Small tolerance for "touching"
+        
+        if (GRID_MIN != null && Math.abs(currentPrice - GRID_MIN) < tolerance) {
+            // Price is touching GRID_MIN, add three gray lines below
+            const spacing = (GRID_MAX - GRID_MIN) * 0.01; // 1% spacing
+            for (let i = 1; i <= 3; i++) {
+                const grayLineY = GRID_MIN - (spacing * i);
+                shapes.push(shapeForY(grayLineY, '#999999', 1, 'solid'));
+            }
+        }
+        
+        if (GRID_MAX != null && Math.abs(currentPrice - GRID_MAX) < tolerance) {
+            // Price is touching GRID_MAX, add three gray lines above
+            const spacing = (GRID_MAX - GRID_MIN) * 0.01; // 1% spacing
+            for (let i = 1; i <= 3; i++) {
+                const grayLineY = GRID_MAX + (spacing * i);
+                shapes.push(shapeForY(grayLineY, '#999999', 1, 'solid'));
+            }
+        }
     }
 
     Plotly.relayout('chart', {
