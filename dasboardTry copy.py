@@ -484,6 +484,24 @@ HTML = r"""<!doctype html>
   .grid-boundary {
     color: #8b5cf6 !important;
   }
+  
+  /* Loading indicator styles */
+  .loading-indicator {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--muted);
+    border-radius: 50%;
+    border-top-color: var(--primary, #007bff);
+    animation: spin 1s ease-in-out infinite;
+    margin-left: 8px;
+  }
+  
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  
+  .hidden { display: none; }
 </style>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -804,12 +822,45 @@ function showChartError(message) {
 }
 
 
+/* ===== Loading state management ===== */
+const cardLoadingStates = new Set();
+const initializedCards = new Set();
+
+function setLoadingState(id) {
+  cardLoadingStates.add(id);
+  const el = document.getElementById(id);
+  if (el) {
+    el.innerHTML = '<span class="loading-indicator"></span>';
+  }
+}
+
+function clearLoadingState(id) {
+  cardLoadingStates.delete(id);
+  initializedCards.add(id);
+}
+
+function isCardLoading(id) {
+  return cardLoadingStates.has(id);
+}
+
+function isCardInitialized(id) {
+  return initializedCards.has(id);
+}
+
 /* ===== Update profits cards ===== */
 function setText(id, val, digits=2){
   const el = document.getElementById(id);
   if (!el) return;
-  if (val === null || val === undefined || isNaN(val)) el.textContent = '0.00';
-  else el.textContent = Number(val).toFixed(digits);
+  
+  // Clear loading state since we're setting data (even if null)
+  clearLoadingState(id);
+  
+  if (val === null || val === undefined || isNaN(val)) {
+    el.textContent = '—';
+  } else {
+    // Real value (including real zeros)
+    el.textContent = digits === 0 ? String(Math.round(val)) : Number(val).toFixed(digits);
+  }
 }
 
 function updateProfitWithTrigger(profit, trigger){
