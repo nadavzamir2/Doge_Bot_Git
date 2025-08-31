@@ -141,7 +141,7 @@ def suggest_solution(error: Exception, region: str, api_type: str) -> None:
     elif "Invalid Api-Key ID" in error_message or "-2008" in error_message:
         suggestion = (
             f"→ {api_type}: Key doesn't match region or is incorrect. "
-            f"Verify binance.us vs binance.com and re-paste key to .env file."
+            f"Verify binance.us vs binance.comorders and re-paste key to .env file."
         )
         print(colorize_text(suggestion, "info"))
 

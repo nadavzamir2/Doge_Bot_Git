@@ -29,6 +29,14 @@ from typing import Optional
 from flask import Flask, Response, jsonify, request, render_template_string, make_response
 from dotenv import load_dotenv
 import ccxt
+try:
+  from dogebot import local_store  # refactored package path
+except Exception:
+  # fallback if running older layout
+  try:
+    import dogebot.local_store as local_store
+  except Exception:
+    local_store = None
 
 # =========================================================
 # ENV & CONSTANTS
@@ -127,6 +135,7 @@ def make_client():
     return ex
 
 CLIENT = make_client()
+_PUBLIC_FALLBACK_CLIENT = None  # created lazily if auth client fails for public ticker
 
 # =========================================================
 # HISTORY LOAD/SAVE
@@ -202,17 +211,89 @@ def record_price_point(price: float, ts_ms: Optional[int] = None):
     _current_price = float(price)
     _current_ts_ms = int(ts_ms)
 
+def _seed_initial_price():
+  """Seed initial current price so dashboard shows a value immediately.
+
+  Order of attempts:
+  1. Use last point from loaded PRICE_WINDOW history (if any)
+  2. Try auth client fetch_ticker
+  3. Try public fallback client fetch_ticker
+  Silently ignore failures; dashboard will rely on poller later.
+  """
+  global _current_price, _current_ts_ms, _PUBLIC_FALLBACK_CLIENT
+  if _current_price is not None:
+    return
+  # 1. history
+  try:
+    if PRICE_WINDOW:
+      last = PRICE_WINDOW[-1]
+      _current_price = float(last["p"])
+      _current_ts_ms = int(last["t"])
+      return
+  except Exception:
+    pass
+  # 2. auth client
+  try:
+    t = CLIENT.fetch_ticker(PAIR)
+    price = t.get("last") or t.get("close") or t.get("bid") or t.get("ask")
+    if price:
+      record_price_point(price)
+      return
+  except Exception:
+    pass
+  # 3. public client
+  try:
+    if _PUBLIC_FALLBACK_CLIENT is None:
+      if BINANCE_REGION == "us":
+        Cls = ccxt.binanceus
+      else:
+        Cls = ccxt.binance
+      _PUBLIC_FALLBACK_CLIENT = Cls({
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot", "fetchCurrencies": False},
+      })
+      try:
+        _PUBLIC_FALLBACK_CLIENT.load_markets()
+      except Exception:
+        pass
+    t2 = _PUBLIC_FALLBACK_CLIENT.fetch_ticker(PAIR)
+    p2 = t2.get("last") or t2.get("close") or t2.get("bid") or t2.get("ask")
+    if p2:
+      record_price_point(p2)
+  except Exception:
+    pass
+
 def _price_poller():
-    """Fetch latest price every few seconds to keep chart moving (even without bot)."""
-    while not _sse_stop.is_set():
-        try:
-            t = CLIENT.fetch_ticker(PAIR)
-            price = t.get("last") or t.get("close") or t.get("bid") or t.get("ask")
-            if price:
-                record_price_point(price)
-        except Exception:
+  """Fetch latest price every few seconds to keep chart moving (even without bot)."""
+  while not _sse_stop.is_set():
+    try:
+      t = CLIENT.fetch_ticker(PAIR)
+      price = t.get("last") or t.get("close") or t.get("bid") or t.get("ask")
+      if price:
+        record_price_point(price)
+    except Exception:
+      global _PUBLIC_FALLBACK_CLIENT
+      try:
+        if _PUBLIC_FALLBACK_CLIENT is None:
+          if BINANCE_REGION == "us":
+            Cls = ccxt.binanceus
+          else:
+            Cls = ccxt.binance
+          _PUBLIC_FALLBACK_CLIENT = Cls({
+            "enableRateLimit": True,
+            "options": {"defaultType": "spot", "fetchCurrencies": False},
+          })
+          try:
+            _PUBLIC_FALLBACK_CLIENT.load_markets()
+          except Exception:
             pass
-        _sse_stop.wait(3.0)
+        t2 = _PUBLIC_FALLBACK_CLIENT.fetch_ticker(PAIR)
+        p2 = t2.get("last") or t2.get("close") or t2.get("bid") or t2.get("ask")
+        if p2:
+          record_price_point(p2)
+      except Exception:
+        pass
+    _sse_stop.wait(3.0)
 
 def _load_stats_safely():
     global _stats_mtime, _stats_cache
@@ -269,6 +350,7 @@ def _sse_generator():
         time.sleep(2)
 
 # Start background poller
+_seed_initial_price()
 threading.Thread(target=_price_poller, name="price_poller", daemon=True).start()
 
 # =========================================================
@@ -370,103 +452,102 @@ def _auth_available():
 
 @app.get("/api/open_orders")
 def api_open_orders():
-    if not _auth_available():
-        return {"ok": False, "error": "No API key/secret configured", "orders": []}
-    try:
-        orders = CLIENT.fetch_open_orders(PAIR, params={"recvWindow": RECV_WINDOW})
-        out = []
-        for o in orders:
-            ts = o.get("timestamp") or o.get("datetime")
-            if isinstance(ts, (int, float)):
-                ts_iso = datetime.utcfromtimestamp(ts / 1000.0).isoformat() + "Z"
-            else:
-                ts_iso = str(ts)
-            price = float(o.get("price") or 0)
-            amount = float(o.get("amount") or 0)
-            out.append({
-                "time": ts_iso,
-                "side": o.get("side"),
-                "price": price,
-                "amount": amount,
-                "value_usdt": price * amount,
-            })
-        return {"ok": True, "orders": out}
-    except Exception as e:
-        return {"ok": False, "error": str(e), "orders": []}
+  if not _auth_available():
+    if local_store:
+      return {"ok": True, "source": "local", "orders": local_store.list_open_orders()}
+    return {"ok": False, "error": "No API key/secret configured", "orders": []}
+  try:
+    orders = CLIENT.fetch_open_orders(PAIR, params={"recvWindow": RECV_WINDOW})
+    out = []
+    for o in orders:
+      ts = o.get("timestamp") or o.get("datetime")
+      if isinstance(ts, (int, float)):
+        ts_iso = datetime.utcfromtimestamp(ts / 1000.0).isoformat() + "Z"
+      else:
+        ts_iso = str(ts)
+      price = float(o.get("price") or 0)
+      amount = float(o.get("amount") or 0)
+      out.append({
+        "time": ts_iso,
+        "side": o.get("side"),
+        "price": price,
+        "amount": amount,
+        "value_usdt": price * amount,
+      })
+    return {"ok": True, "orders": out}
+  except Exception as e:
+    return {"ok": False, "error": str(e), "orders": []}
 
 @app.get("/api/order_history")
 def api_order_history():
-    if not _auth_available():
-        return {"ok": False, "error": "No API key/secret configured", "orders": []}
-    out = []
+  if not _auth_available():
+    if local_store:
+      return {"ok": True, "source": "local", "orders": local_store.list_history()}
+    return {"ok": False, "error": "No API key/secret configured", "orders": []}
+  out = []
+  try:
+    orders = CLIENT.fetch_orders(PAIR, limit=50, params={"recvWindow": RECV_WINDOW})
+    for o in orders:
+      status = (o.get("status") or "").lower()
+      if status not in ("closed", "filled", "canceled"):
+        continue
+
+      # Placement timestamp
+      placement_ts = o.get("timestamp") or o.get("datetime")
+      if isinstance(placement_ts, (int, float)):
+        placement_ts_iso = datetime.utcfromtimestamp(placement_ts / 1000.0).isoformat() + "Z"
+      else:
+        placement_ts_iso = str(placement_ts)
+
+      # Execution timestamp
+      execution_ts = o.get("lastTradeTimestamp")
+      if not execution_ts and o.get("info"):
+        execution_ts = o.get("info", {}).get("updateTime")
+      if not execution_ts:
+        execution_ts = placement_ts
+
+      if isinstance(execution_ts, (int, float)):
+        execution_ts_iso = datetime.utcfromtimestamp(execution_ts / 1000.0).isoformat() + "Z"
+      else:
+        execution_ts_iso = str(execution_ts)
+
+      price = float(o.get("price") or o.get("average") or 0)
+      amount = float(o.get("amount") or o.get("filled") or 0)
+      out.append({
+        "time": placement_ts_iso,
+        "execution_time": execution_ts_iso,
+        "side": o.get("side"),
+        "price": price,
+        "amount": amount,
+        "value_usdt": price * amount,
+        "status": status,
+      })
+    return {"ok": True, "orders": out}
+  except Exception:
+    # fallback: trades
     try:
-        orders = CLIENT.fetch_orders(PAIR, limit=50, params={"recvWindow": RECV_WINDOW})
-        for o in orders:
-            status = (o.get("status") or "").lower()
-            if status not in ("closed", "filled", "canceled"):
-                continue
-            
-            # Placement timestamp (when order was created)
-            placement_ts = o.get("timestamp") or o.get("datetime")
-            if isinstance(placement_ts, (int, float)):
-                placement_ts_iso = datetime.utcfromtimestamp(placement_ts / 1000.0).isoformat() + "Z"
-            else:
-                placement_ts_iso = str(placement_ts)
-            
-            # Execution timestamp (when order was filled)
-            # Try multiple fields: lastTradeTimestamp, info.updateTime, or fallback to placement time
-            execution_ts = o.get("lastTradeTimestamp")
-            if not execution_ts and o.get("info"):
-                execution_ts = o.get("info", {}).get("updateTime")
-            if not execution_ts:
-                execution_ts = placement_ts  # Fallback to placement time
-            
-            if isinstance(execution_ts, (int, float)):
-                execution_ts_iso = datetime.utcfromtimestamp(execution_ts / 1000.0).isoformat() + "Z"
-            else:
-                execution_ts_iso = str(execution_ts)
-            
-            price = float(o.get("price") or o.get("average") or 0)
-            amount = float(o.get("amount") or o.get("filled") or 0)
-            out.append({
-                "time": placement_ts_iso,
-                "execution_time": execution_ts_iso,
-                "side": o.get("side"),
-                "price": price,
-                "amount": amount,
-                "value_usdt": price * amount,
-                "status": status,
-            })
-        return {"ok": True, "orders": out}
-    except Exception:
-        # fallback: trades
-        try:
-            trades = CLIENT.fetch_my_trades(PAIR, limit=50, params={"recvWindow": RECV_WINDOW})
-            for t in trades:
-                # For trades, timestamp is execution time, placement time is unknown
-                execution_ts = t.get("timestamp") or t.get("datetime")
-                if isinstance(execution_ts, (int, float)):
-                    execution_ts_iso = datetime.utcfromtimestamp(execution_ts / 1000.0).isoformat() + "Z"
-                else:
-                    execution_ts_iso = str(execution_ts)
-                
-                # For trades, we don't have placement time, so mark as unavailable
-                placement_ts_iso = "—"  # Unavailable for trades
-                
-                price = float(t.get("price") or 0)
-                amount = float(t.get("amount") or 0)
-                out.append({
-                    "time": placement_ts_iso,
-                    "execution_time": execution_ts_iso,
-                    "side": t.get("side"),
-                    "price": price,
-                    "amount": amount,
-                    "value_usdt": price * amount,
-                    "status": "done",
-                })
-            return {"ok": True, "orders": out}
-        except Exception as e2:
-            return {"ok": False, "error": str(e2), "orders": []}
+      trades = CLIENT.fetch_my_trades(PAIR, limit=50, params={"recvWindow": RECV_WINDOW})
+      for t in trades:
+        execution_ts = t.get("timestamp") or t.get("datetime")
+        if isinstance(execution_ts, (int, float)):
+          execution_ts_iso = datetime.utcfromtimestamp(execution_ts / 1000.0).isoformat() + "Z"
+        else:
+          execution_ts_iso = str(execution_ts)
+        placement_ts_iso = "—"
+        price = float(t.get("price") or 0)
+        amount = float(t.get("amount") or 0)
+        out.append({
+          "time": placement_ts_iso,
+          "execution_time": execution_ts_iso,
+          "side": t.get("side"),
+          "price": price,
+          "amount": amount,
+          "value_usdt": price * amount,
+          "status": "done",
+        })
+      return {"ok": True, "orders": out}
+    except Exception as e2:
+      return {"ok": False, "error": str(e2), "orders": []}
 
 @app.post("/api/stop_bot")
 def api_stop_bot():

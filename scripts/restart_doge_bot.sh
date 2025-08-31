@@ -1,5 +1,7 @@
 #!/bin/bash
 
+source /Users/yuvalzamir/doge_bot/venv/bin/activate
+
 # עצור תהליכי python קיימים (של הבוט/דשבורד)
 pkill -f dash_server.py
 pkill -f bot.py

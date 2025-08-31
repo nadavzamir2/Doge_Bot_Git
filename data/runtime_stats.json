@@ -1,1 +1,1 @@
-{"schema_version": 1, "cumulative_profit_usd": 1.123664599999996, "bnb_converted_usd": 0.0, "splits_count": 35, "trade_count": 0, "trigger_amount_usd": 4.0, "last_update_ts": 1756129622.896805}
+{"cumulative_profit_usd": 12.34, "total_profit_usd": 12.34, "splits_count": 5, "sell_trades_count": 5, "actual_splits_count": 4, "bnb_converted_usd": 1.11, "realized_profit_usd": 10.0, "unrealized_profit_usd": 2.0, "grid_profit_usd": 8.0, "fees_usd": 0.66, "profit_pct": 3.21, "split_trigger_usd": 4.0}
