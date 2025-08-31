@@ -17,16 +17,26 @@ Features:
 
 import json
 import logging
-import math
-import os
 import signal
 import sys
 import time
-from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
+from decimal import Decimal
 from typing import Any, Dict, Optional
 
 import ccxt
-from dotenv import load_dotenv
+
+# Import centralized configuration
+from config import (
+    API_KEY, API_SECRET, BASE_ORDER_USD, FEE_BUFFER, GRID_HIGH_PRICE,
+    GRID_LOW_PRICE, GRID_STEP_PERCENT, MAX_CYCLE_USD, MODE, POLL_SECONDS,
+    RECV_WINDOW, REGION, STATE_FILE_PATH, TRADING_PAIR, get_config_summary,
+    get_exchange_class, validate_required_config
+)
+
+# Import trading utilities
+from trading_utils import (
+    round_amount_down, round_price_down, to_decimal, validate_order_params
+)
 
 # Optional profit splitting module
 try:
@@ -35,7 +45,7 @@ except ImportError:
     profit_split = None
 
 
-# ==================== CONFIGURATION ====================
+# ==================== LOGGING SETUP ====================
 
 # Logging configuration
 logging.basicConfig(
@@ -45,55 +55,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("doge_grid_bot")
 
-# Environment file loading
-ENV_PATH = os.path.expanduser("~/doge_bot/.env")
-if os.path.exists(ENV_PATH):
-    load_dotenv(ENV_PATH)
-else:
-    load_dotenv()  # fallback to default .env
-
-# Trading mode and region configuration
-MODE = os.getenv("MODE", "LIVE").upper()  # LIVE / PAPER
-REGION = os.getenv("BINANCE_REGION", "com").lower()  # com / us
-RECV_WINDOW = int(os.getenv("BINANCE_RECVWINDOW", "10000"))
-
-# API Keys - supports separate TRADE/READ keys or legacy combined keys
-API_KEY = os.getenv("BINANCE_TRADE_KEY") or os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_TRADE_SECRET") or os.getenv("BINANCE_API_SECRET")
-
-# Trading pair configuration
-TRADING_PAIR = os.getenv("PAIR", "DOGE/USDT")
-
-# Grid trading parameters
-GRID_LOW_PRICE = Decimal(os.getenv("GRID_LOW", "0.13"))
-GRID_HIGH_PRICE = Decimal(os.getenv("GRID_HIGH", "0.32"))
-GRID_STEP_PERCENT = Decimal(os.getenv("STEP_PCT", "1.0"))  # Percentage between layers
-
-# Order sizing and budget parameters
-BASE_ORDER_USD = Decimal(os.getenv("BASE_ORDER_USD", "5.0"))
-MAX_CYCLE_USD = Decimal(os.getenv("MAX_CYCLE_USD", "40.0"))
-
-# Fee buffer to avoid MIN_NOTIONAL issues
-FEE_BUFFER = Decimal(os.getenv("FEE_BUFFER", "0.001"))  # 0.1% default
-
-# State file path
-STATE_FILE_PATH = os.path.expanduser("~/doge_bot/state.json")
-
 
 # ==================== UTILITY FUNCTIONS ====================
 
 
-def to_decimal(value) -> Decimal:
-    """
-    Convert a value to Decimal for precise arithmetic.
+# ==================== UTILITY FUNCTIONS ====================
 
-    Args:
-        value: Value to convert (Decimal, int, float, or string)
-
-    Returns:
-        Decimal: Converted value
-    """
-    return value if isinstance(value, Decimal) else Decimal(str(value))
+# Most utility functions are now imported from trading_utils.py
+# This reduces code duplication and improves maintainability
 
 
 def load_trading_state() -> Dict[str, Any]:
@@ -137,21 +106,27 @@ def save_trading_state(state: Dict[str, Any]) -> None:
 
 def create_exchange_client() -> ccxt.Exchange:
     """
-    Create and configure a CCXT exchange client.
-
+    Create and configure the exchange client based on configuration.
+    
     Returns:
-        ccxt.Exchange: Configured exchange client
-
+        Configured exchange client instance
+        
     Raises:
-        ValueError: If required API credentials are missing
+        ValueError: If API credentials are missing or exchange setup fails
     """
-    if not API_KEY or not API_SECRET:
-        raise ValueError("API key and secret are required")
-
-    exchange_class = ccxt.binanceus if REGION == "us" else ccxt.binance
-
-    return exchange_class(
-        {
+    # Validate required configuration
+    missing_config = validate_required_config()
+    if missing_config:
+        raise ValueError(f"Missing required configuration: {', '.join(missing_config)}")
+    
+    exchange_class_name = get_exchange_class()
+    
+    try:
+        # Get the exchange class dynamically
+        exchange_class = ccxt.binanceus if REGION == "us" else ccxt.binance
+        
+        # Create exchange instance with configuration
+        exchange = exchange_class({
             "apiKey": API_KEY,
             "secret": API_SECRET,
             "enableRateLimit": True,
@@ -160,8 +135,13 @@ def create_exchange_client() -> ccxt.Exchange:
                 "adjustForTimeDifference": True,
                 "fetchCurrencies": False,  # Avoid signature requirements
             },
-        }
-    )
+        })
+        
+        log.info("Created %s exchange client (mode: %s)", exchange_class_name, MODE)
+        return exchange
+        
+    except Exception as e:
+        raise ValueError(f"Failed to create exchange client: {e}")
 
 
 def load_market_precision(exchange: ccxt.Exchange, symbol: str) -> Dict[str, Any]:
@@ -224,38 +204,7 @@ def load_market_precision(exchange: ccxt.Exchange, symbol: str) -> Dict[str, Any
     }
 
 
-def round_price_down(price: Decimal, tick_size: Decimal) -> Decimal:
-    """
-    Round price down to the nearest tick size.
-
-    Args:
-        price: Price to round
-        tick_size: Minimum price increment
-
-    Returns:
-        Decimal: Rounded price
-    """
-    if tick_size <= 0:
-        return price
-    quotient = (price / tick_size).to_integral_value(rounding=ROUND_FLOOR)
-    return (quotient * tick_size).quantize(tick_size, rounding=ROUND_HALF_UP)
-
-
-def round_amount_down(amount: Decimal, step_size: Decimal) -> Decimal:
-    """
-    Round amount down to the nearest step size.
-
-    Args:
-        amount: Amount to round
-        step_size: Minimum amount increment
-
-    Returns:
-        Decimal: Rounded amount
-    """
-    if step_size <= 0:
-        return amount
-    quotient = (amount / step_size).to_integral_value(rounding=ROUND_FLOOR)
-    return (quotient * step_size).quantize(step_size, rounding=ROUND_HALF_UP)
+# Round functions moved to trading_utils.py
 
 
 def generate_client_order_id(prefix: str) -> str:
@@ -622,45 +571,33 @@ def _process_filled_sell_orders(
 # ==================== MAIN EXECUTION ====================
 
 
-def run_trading_bot() -> None:
+def setup_trading_environment() -> tuple[ccxt.Exchange, Dict[str, Any]]:
     """
-    Main trading bot execution function.
-
-    Initializes the bot, sets up grid trading, and runs the main trading loop.
+    Set up the trading environment by creating exchange client and loading market info.
+    
+    Returns:
+        Tuple of (exchange client, market info dictionary)
+        
+    Raises:
+        ValueError: If setup fails
     """
-    log.info("Starting DOGE Grid Trading Bot")
-    log.info("Mode: %s", MODE)
-    log.info("Environment: %s", ENV_PATH if os.path.exists(ENV_PATH) else "(default)")
-    log.info("Region: %s (class=%s)", REGION, "binanceus" if REGION == "us" else "binance")
-    log.info(
-        "Trade key prefix: %s…  secret prefix: %s…", (API_KEY or "")[:6], (API_SECRET or "")[:6]
-    )
-    log.info(
-        "Pair=%s | Grid=%.6f..%.6f (step=%.3f%%) | base_order_usd=%.2f | max_cycle=%.2f",
-        TRADING_PAIR,
-        float(GRID_LOW_PRICE),
-        float(GRID_HIGH_PRICE),
-        float(GRID_STEP_PERCENT),
-        float(BASE_ORDER_USD),
-        float(MAX_CYCLE_USD),
-    )
-
+    # Create exchange client
     try:
         exchange = create_exchange_client()
     except ValueError as e:
         log.error("Exchange client creation failed: %s", e)
-        return
-
+        raise
+    
     # Load market precision and limits
     try:
         market_info = load_market_precision(exchange, TRADING_PAIR)
     except ccxt.AuthenticationError as e:
         log.error("Authentication error while loading markets: %s", e)
-        return
+        raise ValueError(f"Authentication failed: {e}")
     except Exception as e:
         log.error("Failed to load market precision: %s", e)
-        return
-
+        raise ValueError(f"Market info loading failed: {e}")
+    
     log.info(
         "Exchange info: %s",
         {
@@ -671,6 +608,69 @@ def run_trading_bot() -> None:
             "min_cost": float(market_info["min_cost"]),
         },
     )
+    
+    return exchange, market_info
+
+
+def setup_signal_handlers() -> callable:
+    """
+    Set up signal handlers for graceful shutdown.
+    
+    Returns:
+        Function that returns True when shutdown is requested
+    """
+    stop_flag = False
+    
+    def signal_handler(signum, frame):
+        nonlocal stop_flag
+        log.info("Received signal %s, shutting down gracefully...", signum)
+        stop_flag = True
+    
+    def should_stop():
+        return stop_flag
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    return should_stop
+
+
+def log_startup_info():
+    """Log startup information and configuration summary."""
+    config_summary = get_config_summary()
+    
+    log.info("Starting DOGE Grid Trading Bot")
+    log.info("Mode: %s", config_summary["mode"])
+    log.info("Environment: %s", config_summary["env_path"])
+    log.info("Region: %s (class=%s)", config_summary["region"], config_summary["exchange_class"])
+    log.info(
+        "Trade key prefix: %s…  secret prefix: %s…", 
+        (API_KEY or "")[:6], 
+        (API_SECRET or "")[:6]
+    )
+    log.info(
+        "Pair=%s | Grid=%s (step=%.3f%%) | base_order_usd=%.2f | max_cycle=%.2f",
+        config_summary["pair"],
+        config_summary["grid_range"],
+        config_summary["grid_step_pct"],
+        config_summary["base_order_usd"],
+        config_summary["max_cycle_usd"],
+    )
+
+
+def run_trading_bot() -> None:
+    """
+    Main trading bot execution function.
+
+    Initializes the bot, sets up grid trading, and runs the main trading loop.
+    """
+    log_startup_info()
+    
+    # Set up trading environment
+    try:
+        exchange, market_info = setup_trading_environment()
+    except ValueError:
+        return  # Error already logged
 
     # Load trading state
     state = load_trading_state()
@@ -680,27 +680,18 @@ def run_trading_bot() -> None:
     bootstrap_buy_orders(exchange, market_info, TRADING_PAIR, BASE_ORDER_USD, MAX_CYCLE_USD)
 
     # Set up signal handlers for graceful shutdown
-    stop_flag = False
-
-    def signal_handler(signum, frame):
-        nonlocal stop_flag
-        log.info("Received signal %s, shutting down gracefully...", signum)
-        stop_flag = True
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    should_stop = setup_signal_handlers()
 
     # Main trading loop
-    poll_interval = int(os.getenv("POLL_SECONDS", "7"))
-    log.info("Starting main trading loop (poll interval: %d seconds)", poll_interval)
+    log.info("Starting main trading loop (poll interval: %d seconds)", POLL_SECONDS)
 
-    while not stop_flag:
+    while not should_stop():
         try:
             handle_order_fills_and_create_sells(exchange, market_info, TRADING_PAIR, state)
         except Exception as e:
             log.error("Error in trading loop: %s", e)
 
-        time.sleep(poll_interval)
+        time.sleep(POLL_SECONDS)
 
     log.info("Trading bot shutdown complete")
 

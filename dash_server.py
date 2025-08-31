@@ -34,53 +34,69 @@ import ccxt
 # ENV & CONSTANTS
 # =========================================================
 
-ENV_FILE = os.path.expanduser("~/doge_bot/.env")
-# Also try loading from current directory if the primary location doesn't exist
-if not os.path.exists(ENV_FILE):
-    ENV_FILE = ".env"
-load_dotenv(ENV_FILE)
+# =========================================================
+# ENV & CONSTANTS
+# =========================================================
 
-BINANCE_REGION = os.getenv("BINANCE_REGION", "com").strip().lower()  # 'com' or 'us'
-API_KEY = os.getenv("BINANCE_TRADE_KEY") or os.getenv("BINANCE_API_KEY") or ""
-API_SECRET = os.getenv("BINANCE_TRADE_SECRET") or os.getenv("BINANCE_API_SECRET") or ""
-RECV_WINDOW = int(os.getenv("BINANCE_RECVWINDOW", "10000"))
-PAIR = os.getenv("PAIR", "DOGE/USDT").strip()
+# Import centralized configuration
+try:
+    from config import (
+        API_KEY, API_SECRET, BASE_ORDER_USD, DATA_DIR, GRID_MAX, GRID_MIN, 
+        GRID_STEP_PCT, HISTORY_FILE_PATH as HISTORY_FILE, MAX_USD_FOR_CYCLE,
+        PROFIT_SPLIT_TRIGGER_USD, RECV_WINDOW, REGION as BINANCE_REGION,
+        SPLIT_CHUNK_USD, STATS_FILE_PATH as STATS_FILE, TRADING_PAIR as PAIR
+    )
+except ImportError:
+    # Fallback to local configuration if config.py is not available
+    from dotenv import load_dotenv
+    
+    ENV_FILE = os.path.expanduser("~/doge_bot/.env")
+    if not os.path.exists(ENV_FILE):
+        ENV_FILE = ".env"
+    load_dotenv(ENV_FILE)
+    
+    def _env_float(name: str):
+        v = os.getenv(name)
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except Exception:
+            return None
+    
+    BINANCE_REGION = os.getenv("BINANCE_REGION", "com").strip().lower()
+    API_KEY = os.getenv("BINANCE_TRADE_KEY") or os.getenv("BINANCE_API_KEY") or ""
+    API_SECRET = os.getenv("BINANCE_TRADE_SECRET") or os.getenv("BINANCE_API_SECRET") or ""
+    RECV_WINDOW = int(os.getenv("BINANCE_RECVWINDOW", "10000"))
+    PAIR = os.getenv("PAIR", "DOGE/USDT").strip()
+    
+    GRID_MIN = _env_float("GRID_MIN")
+    GRID_MAX = _env_float("GRID_MAX")
+    GRID_STEP_PCT = _env_float("GRID_STEP_PCT")
+    
+    BASE_ORDER_USD = _env_float("BASE_ORDER_USD") or 0.0
+    MAX_USD_FOR_CYCLE = _env_float("MAX_USD_FOR_CYCLE") or 0.0
+    SPLIT_CHUNK_USD = _env_float("SPLIT_CHUNK_USD") or 4.0
+    
+    PROFIT_SPLIT_TRIGGER_USD = (
+        _env_float("PROFIT_SPLIT_TRIGGER_USD")
+        or _env_float("SPLIT_TRIGGER_USD")
+        or _env_float("PROFIT_TRIGGER_USD")
+        or 0.0
+    )
+    
+    DATA_DIR = pathlib.Path.home() / "doge_bot" / "data"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORY_FILE = DATA_DIR / "price_history.json"
+    STATS_FILE = DATA_DIR / "runtime_stats.json"
 
-def _env_float(name: str):
-    v = os.getenv(name)
-    if v is None or v == "":
-        return None
-    try:
-        return float(v)
-    except Exception:
-        return None
-
-# Grid info for UI card (optional)
-GRID_MIN = _env_float("GRID_MIN")
-GRID_MAX = _env_float("GRID_MAX")
-GRID_STEP_PCT = _env_float("GRID_STEP_PCT")
-
-# Initial investment amounts
-BASE_ORDER_USD = _env_float("BASE_ORDER_USD") or 0.0
-MAX_USD_FOR_CYCLE = _env_float("MAX_USD_FOR_CYCLE") or 0.0
-SPLIT_CHUNK_USD = _env_float("SPLIT_CHUNK_USD") or 4.0
-
-# Profit split trigger fallback from env (if not in stats file)
-SPLIT_TRIGGER_ENV = (
-    _env_float("PROFIT_SPLIT_TRIGGER_USD")
-    or _env_float("SPLIT_TRIGGER_USD")
-    or _env_float("PROFIT_TRIGGER_USD")
-    or 0.0
-)
-
-DATA_DIR = pathlib.Path.home() / "doge_bot" / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-HISTORY_FILE = DATA_DIR / "price_history.json"
-STATS_FILE = DATA_DIR / "runtime_stats.json"
-
+# Additional dashboard-specific configuration
 MAX_HISTORY = int(os.getenv("DASH_MAX_HISTORY", "10000"))  # max points kept in RAM/UI
 PRICE_WINDOW = deque([], maxlen=MAX_HISTORY)
 HISTORY_LOCK = threading.Lock()
+
+# For backward compatibility in API responses
+SPLIT_TRIGGER_ENV = PROFIT_SPLIT_TRIGGER_USD
 
 # =========================================================
 # CCXT CLIENT (public for price, private only if keys exist)
@@ -1056,7 +1072,6 @@ async function loadStats(){
   
   try{
     const r = await fetch('/api/stats');
-    const j = await r.json();
     const j = await r.json();
     
     // Handle price separately since it uses a different format
