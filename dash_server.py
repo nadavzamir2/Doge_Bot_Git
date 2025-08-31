@@ -41,8 +41,8 @@ import ccxt
 # Import centralized configuration
 try:
     from config import (
-        API_KEY, API_SECRET, DATA_DIR, GRID_MAX, GRID_MIN, GRID_STEP_PCT,
-        HISTORY_FILE_PATH as HISTORY_FILE, MAX_USD_FOR_CYCLE,
+        API_KEY, API_SECRET, BASE_ORDER_USD, DATA_DIR, GRID_MAX, GRID_MIN, 
+        GRID_STEP_PCT, HISTORY_FILE_PATH as HISTORY_FILE, MAX_USD_FOR_CYCLE,
         PROFIT_SPLIT_TRIGGER_USD, RECV_WINDOW, REGION as BINANCE_REGION,
         SPLIT_CHUNK_USD, STATS_FILE_PATH as STATS_FILE, TRADING_PAIR as PAIR
     )
@@ -74,6 +74,7 @@ except ImportError:
     GRID_MAX = _env_float("GRID_MAX")
     GRID_STEP_PCT = _env_float("GRID_STEP_PCT")
     
+    BASE_ORDER_USD = _env_float("BASE_ORDER_USD") or 0.0
     MAX_USD_FOR_CYCLE = _env_float("MAX_USD_FOR_CYCLE") or 0.0
     SPLIT_CHUNK_USD = _env_float("SPLIT_CHUNK_USD") or 4.0
     
