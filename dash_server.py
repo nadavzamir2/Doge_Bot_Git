@@ -23,7 +23,7 @@ import webbrowser
 import pathlib
 import threading
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from flask import Flask, Response, jsonify, request, render_template_string, make_response
@@ -462,7 +462,7 @@ def api_open_orders():
     for o in orders:
       ts = o.get("timestamp") or o.get("datetime")
       if isinstance(ts, (int, float)):
-        ts_iso = datetime.utcfromtimestamp(ts / 1000.0).isoformat() + "Z"
+        ts_iso = datetime.fromtimestamp(ts / 1000.0, timezone.utc).isoformat() + "Z"
       else:
         ts_iso = str(ts)
       price = float(o.get("price") or 0)
@@ -495,7 +495,7 @@ def api_order_history():
       # Placement timestamp
       placement_ts = o.get("timestamp") or o.get("datetime")
       if isinstance(placement_ts, (int, float)):
-        placement_ts_iso = datetime.utcfromtimestamp(placement_ts / 1000.0).isoformat() + "Z"
+        placement_ts_iso = datetime.fromtimestamp(placement_ts / 1000.0, timezone.utc).isoformat() + "Z"
       else:
         placement_ts_iso = str(placement_ts)
 
@@ -507,7 +507,7 @@ def api_order_history():
         execution_ts = placement_ts
 
       if isinstance(execution_ts, (int, float)):
-        execution_ts_iso = datetime.utcfromtimestamp(execution_ts / 1000.0).isoformat() + "Z"
+        execution_ts_iso = datetime.fromtimestamp(execution_ts / 1000.0, timezone.utc).isoformat() + "Z"
       else:
         execution_ts_iso = str(execution_ts)
 
