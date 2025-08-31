@@ -1057,7 +1057,6 @@ async function loadStats(){
   try{
     const r = await fetch('/api/stats');
     const j = await r.json();
-    const j = await r.json();
     
     // Handle price separately since it uses a different format
     if('price' in j && j.price !== null) {
