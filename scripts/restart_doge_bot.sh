@@ -2,13 +2,13 @@
 
 source /Users/yuvalzamir/doge_bot/venv/bin/activate
 
-# עצור תהליכי python קיימים (של הבוט/דשבורד)
+# Stop existing python processes (bot/dashboard)
 pkill -f dash_server.py
 pkill -f bot.py
 
 sleep 2
 
-# הרץ את הבוט ברקע (אם יש bot.py)
+# Run the bot in background (if bot.py exists)
 if [ -f bot.py ]; then
   nohup python3 bot.py > bot.log 2>&1 &
   echo "bot.py running (log: bot.log)"
@@ -16,7 +16,7 @@ fi
 
 sleep 1
 
-# הרץ את הדשבורד (מציג לוגים בטרמינל)
+# Run the dashboard (logs redirected)
 if [ -f dash_server.py ]; then
   nohup python3 dash_server.py > dash.log 2>&1 &
   DASH_PID=$!
@@ -28,9 +28,8 @@ fi
 
 sleep 2
 
-# פתח את הדפדפן לכתובת הדשבורד (Chrome)
-# שים לב: אם אתה על Mac, הפקודה היא open -a "Google Chrome" ...
-# אם אתה על Linux/Ubuntu השתמש google-chrome או chromium-browser
+# Open browser to dashboard (Chrome)
+# Note: macOS -> open -a "Google Chrome" ...; Linux -> google-chrome / chromium-browser
 if command -v google-chrome > /dev/null; then
   google-chrome http://127.0.0.1:8899 &
 elif command -v chromium-browser > /dev/null; then
@@ -38,11 +37,11 @@ elif command -v chromium-browser > /dev/null; then
 elif command -v open > /dev/null; then
   open -a "Google Chrome" http://127.0.0.1:8899 &
 else
-  echo "לא נמצא דפדפן אוטומטי, פתח ידנית: http://127.0.0.1:8899"
+  echo "No browser auto-detected, open manually: http://127.0.0.1:8899"
 fi
 
-# הצג tail חי של הלוג של הדשבורד
-echo "מציג לייב את הלוג של dash_server.py (Ctrl+C לעצירה):"
+# Show live tail of the dashboard log
+echo "Showing live dash_server.py log (Ctrl+C to stop):"
 tail -f dash.log
 
 # bash scripts/restart_doge_bot.sh

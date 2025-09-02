@@ -16,14 +16,15 @@ def need_recenter(last_price: float,
                   edge_pct: int = 90,
                   center_drift_pct_of_width: int | None = None) -> bool:
     """
-    True אם צריך לבצע Recenter—או כי המחיר שוהה בשולי הטווח (edge) זמן מינימום,
-    או כי סטיית המחיר מהמרכז חצתה אחוז מוגדר מרוחב הטווח.
+    Return True if we should recenter:
+    - price has dwelled near a range edge for at least dwell_seconds, OR
+    - deviation from center exceeds a configured percentage of the width.
     dwell_state: {"now": time.time(), "hit_since": Optional[float]}
     """
     now = dwell_state.get("now") or time.time()
     dwell_state["now"] = now
 
-    # קריטריון 1: שולי טווח + שהייה (dwell)
+    # Criterion 1: edge dwell
     hit = _edge_hit(last_price, lower, upper, edge_pct)
     if hit:
         if dwell_state.get("hit_since") is None:
@@ -32,7 +33,7 @@ def need_recenter(last_price: float,
         dwell_state["hit_since"] = None
     edge_ok = hit and (now - (dwell_state.get("hit_since") or now)) >= dwell_seconds
 
-    # קריטריון 2: סטיית מרכז
+    # Criterion 2: center drift
     drift_ok = False
     if center_drift_pct_of_width is not None:
         width = upper - lower
@@ -44,8 +45,8 @@ def need_recenter(last_price: float,
 
 def recenter_bounds(around_price: float, lower: float, upper: float) -> tuple[float, float]:
     """
-    מזיז את הטווח כך שהמחיר הנוכחי יהיה במרכז, ושומר על אותו רוחב טווח.
-    מגביל תחתון למינימום חיובי קטן.
+    Shift the range so around_price is centered, keeping same width.
+    Clamp lower bound to a small positive minimum.
     """
     width = max(upper - lower, 1e-9)
     new_lower = max(1e-9, around_price - width / 2.0)

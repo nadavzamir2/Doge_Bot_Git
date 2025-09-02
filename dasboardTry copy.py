@@ -11,7 +11,7 @@ DOGE Grid Monitor Dashboard (single file)
 - Y axis ticks follow grid layer prices (full price, not shortened)
 - Live price via SSE (/stream) and *live stats via SSE on file-change* of runtime_stats.json
 - Persistent history via /history (saved to ~/doge_bot/data/price_history.json)
-- /api/open_orders  ו-/api/order_history עם מיון/סינון בצד לקוח
+- /api/open_orders and /api/order_history with client-side sorting/filtering
 - Local state for “Show grid layers” checkbox (localStorage)
 """
 
@@ -79,28 +79,28 @@ HISTORY_LOCK = threading.Lock()
 # =========================================================
 
 def make_client():
-    if BINANCE_REGION == "us":
-        Cls = ccxt.binanceus
-    else:
-        Cls = ccxt.binance
-    kwargs = {
-        "enableRateLimit": True,
-        "options": {
-            "defaultType": "spot",
-            "adjustForTimeDifference": True,
-            # חשוב: לא למשוך SAPI של מטבעות בעת load_markets (דורש הרשאות ומפיל חלק מהמשתמשים)
-            "fetchCurrencies": False,
-        },
-    }
-    if API_KEY and API_SECRET:
-        kwargs["apiKey"] = API_KEY
-        kwargs["secret"] = API_SECRET
-    ex = Cls(kwargs)
-    try:
-        ex.load_markets()  # בלי פרמטרים (מונע -1104)
-    except Exception as e:
-        print(f"[WARN] load_markets failed: {e}")
-    return ex
+  if BINANCE_REGION == "us":
+    Cls = ccxt.binanceus
+  else:
+    Cls = ccxt.binance
+  kwargs = {
+    "enableRateLimit": True,
+    "options": {
+      "defaultType": "spot",
+      "adjustForTimeDifference": True,
+      # Important: avoid fetching SAPI currencies during load_markets (needs extra permissions)
+      "fetchCurrencies": False,
+    },
+  }
+  if API_KEY and API_SECRET:
+    kwargs["apiKey"] = API_KEY
+    kwargs["secret"] = API_SECRET
+  ex = Cls(kwargs)
+  try:
+    ex.load_markets()  # No params (avoids -1104)
+  except Exception as e:
+    print(f"[WARN] load_markets failed: {e}")
+  return ex
 
 CLIENT = make_client()
 
@@ -128,7 +128,7 @@ def _save_history_file():
         print(f"[WARN] failed saving history file: {e}")
 
 def _read_stats_file():
-    # אם הבוט שלך כותב לכאן, הדשבורד יציג; אחרת יוצגו אפסים.
+  # If the bot writes stats here they'll display; otherwise zeros show.
     try:
         if STATS_FILE.exists():
             with STATS_FILE.open("r", encoding="utf-8") as f:
@@ -141,15 +141,15 @@ def _read_stats_file():
         "cumulative_profit_usd": 0.0,
         "splits_count": 0,
         "bnb_converted_usd": 0.0,
-        # ערכים אופציונליים לרווחים נוספים:
+  # Optional extra profit values:
         "realized_profit_usd": 0.0,
         "unrealized_profit_usd": 0.0,
         "grid_profit_usd": 0.0,
         "fees_usd": 0.0,
         "profit_pct": 0.0,
-        # אפשרות שגם הטריגר ייכתב ע"י הבוט:
+  # Trigger may also be written by the bot:
         "split_trigger_usd": SPLIT_TRIGGER_ENV,
-        # לחלופין גם total_profit_usd אם קיים:
+  # Alternatively if total_profit_usd exists:
         "total_profit_usd": 0.0,
     }
 
@@ -225,7 +225,7 @@ def _sse_generator():
                     split_trigger = float(stats.get("split_trigger_usd", SPLIT_TRIGGER_ENV) or 0.0)
                 except Exception:
                     split_trigger = SPLIT_TRIGGER_ENV
-                # קבע מדיניות רווח להצגה: total_profit_usd אם קיים, אחרת cumulative_profit_usd
+                # Choose profit metric to show: prefer total_profit_usd else cumulative_profit_usd
                 profit_live = stats.get("total_profit_usd", None)
                 if profit_live is None:
                     profit_live = stats.get("cumulative_profit_usd", 0.0)
@@ -277,7 +277,7 @@ def history_endpoint():
 @app.get("/api/stats")
 def api_stats():
     stats = _read_stats_file()
-    # החזר גם את כל סוגי הרווחים אם קיימים
+  # Also return all profit components if present
     split_trigger = stats.get("split_trigger_usd", SPLIT_TRIGGER_ENV)
     return {
         "price": _current_price,
@@ -539,7 +539,7 @@ HTML = r"""<!doctype html>
       <div class="card"><h3>Converted to BNB (USD)</h3><div id="bnbVal" class="v mono">0.00</div></div>
     </div>
 
-    <!-- EXTRA profit cards (values only; לא נוגעים בשאר) -->
+  <!-- EXTRA profit cards (values only; leave others untouched) -->
     <div class="cards">
       <div class="card"><h3>Realized Profit (USD)</h3><div id="profitRealizedVal" class="v mono">0.00</div></div>
       <div class="card"><h3>Unrealized Profit (USD)</h3><div id="profitUnrealizedVal" class="v mono">0.00</div></div>
@@ -743,7 +743,7 @@ function buildAllLevels(){
   if (!(min > 0) || !(max > min) || !(step > 0)) return [];
   const levels = [min];
   let p = min;
-  const limit = 2000; // הגנה
+  const limit = 2000; // guard
   let guard = 0;
   while (guard++ < limit){
     const next = p * (1 + step);
@@ -1274,7 +1274,7 @@ function startSSE(){
     es.addEventListener('stats', ev=>{
       try{
         const s = JSON.parse(ev.data);
-        // עדכון כרטיסי רווח
+  // Update profit cards
         setText('profitVal', s.profit_usd ?? 0, 2);
         setText('profitRealizedVal', s.realized_profit_usd ?? 0, 2);
         setText('profitUnrealizedVal', s.unrealized_profit_usd ?? 0, 2);
@@ -1518,11 +1518,11 @@ async function boot(){
   showLatEl = document.getElementById('showLat');
   wireControls();
   await loadStats();
-  await loadHistory();    // טוען היסטוריה לפני הזרם
-  startSSE();             // ואז סטרים חי למחיר + סטטיסטיקות
+  await loadHistory();    // load history before stream
+  startSSE();             // then live stream for price + statistics
   await loadOpenOrders();
   await loadHistoryOrders();
-  // רענונים תקופתיים (fallback)
+  // Periodic refresh (fallback)
   setInterval(loadStats, 15000);
   setInterval(loadOpenOrders, 20000);
   setInterval(loadHistoryOrders, 25000);

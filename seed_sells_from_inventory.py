@@ -9,11 +9,11 @@ SEED_TAG = "SEED"
 
 def main():
     p = argparse.ArgumentParser(description="Place a sell ladder from existing DOGE inventory")
-    p.add_argument("--levels", type=int, default=8, help="כמה מדרגות מכירה להציב")
-    p.add_argument("--step-pct", type=float, default=1.0, help="מרווח בין מדרגות (%)")
-    p.add_argument("--lot-doge", type=float, default=30.0, help="כמות DOGE לכל מדרגה")
-    p.add_argument("--dry-run", action="store_true", help="הצבה כ־Dry-run (לא שולח הזמנות)")
-    p.add_argument("--cancel-seed", action="store_true", help="לבטל הזמנות SEED פתוחות במקום להציב חדשות")
+    p.add_argument("--levels", type=int, default=8, help="How many sell ladder levels to place")
+    p.add_argument("--step-pct", type=float, default=1.0, help="Percent gap between levels (%)")
+    p.add_argument("--lot-doge", type=float, default=30.0, help="DOGE amount per level")
+    p.add_argument("--dry-run", action="store_true", help="Dry run (do not send orders)")
+    p.add_argument("--cancel-seed", action="store_true", help="Cancel existing SEED orders instead of placing new ones")
     args = p.parse_args()
 
     load_dotenv()
@@ -32,12 +32,12 @@ def main():
     client.load_markets()
     mkt = client.market(SYMBOL)
 
-    # רט״ז
+    # Ticker (last price)
     ticker = client.fetch_ticker(SYMBOL)
     last = float(ticker["last"])
     print(f"[INFO] Last price {SYMBOL}: {last:.6f}")
 
-    # יתרה חופשית
+    # Free balance
     balance = client.fetch_balance()
     free_doge = float(balance["free"].get("DOGE", 0.0))
     open_orders = client.fetch_open_orders(SYMBOL)
@@ -58,17 +58,17 @@ def main():
 
     print(f"[INFO] Free DOGE: {free_doge}")
 
-    # כמה הזמנות אפשר להציב לפי ה-lot
+    # Number of orders we can place given the lot size
     max_levels_by_balance = int(free_doge // args.lot_doge)
     levels = max(0, min(args.levels, max_levels_by_balance))
     if levels == 0:
         raise SystemExit(f"[ABORT] Not enough free DOGE for lot {args.lot_doge} x {args.levels} levels")
 
-    # מחירים לסולם (מעל המחיר הנוכחי)
+    # Ladder target prices (above current price)
     step = args.step_pct / 100.0
     targets = [ last * ((1.0 + step) ** (i+1)) for i in range(levels) ]
 
-    # אל תכפיל הזמנות שכבר קיימות סביב אותם מחירים (±0.05%)
+    # Skip targets too close to existing sells (±0.05%)
     def too_close(p1, p2):
         return abs(p1 - p2) / p2 <= 0.0005
 
@@ -84,7 +84,7 @@ def main():
         print("[INFO] Nothing to place (all targets near existing sells).")
         return
 
-    # עיגון דיוק לפי הבורסה
+    # Precision helpers per exchange rules
     def p2p(x: float) -> str:  # price to precision (string)
         return client.price_to_precision(SYMBOL, x)
     def a2p(x: float) -> str:  # amount to precision (string)

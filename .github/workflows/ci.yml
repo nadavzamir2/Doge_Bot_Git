@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+            python-version: '3.11'
+
+      - name: Minimal deps (only if requirements exists)
+        if: hashFiles('requirements.txt') != ''
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true  # allow partial (network) failures
+
+      - name: Syntax check (py_compile)
+        run: |
+          python - <<'PY'
+          import sys, compileall
+          ok = compileall.compile_dir('.', quiet=1)
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Hebrew scan
+        run: python scripts/check_no_hebrew.py
+
+      # Optional: enable tests later when network-dependent tests are isolated
+      # - name: Run tests
+      #   run: pytest -q
+
+      - name: Summary
+        run: echo 'CI validation completed.'

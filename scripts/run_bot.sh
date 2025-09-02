@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # --- CONFIG ---
-APP_DIR="${HOME}/doge_bot"         # שנה אם צריך
-PYMAIN="main.py"                   # קובץ הבוט
-PYDASH="dash_server.py"      # קובץ הדשבורד (אם יש)
-DEFAULT_PORT="${PORT:-8000}"       # פורט דשבורד ברירת מחדל
-OPEN_DASHBOARD="${OPEN_DASHBOARD:-1}"  # 1=פתח דפדפן אוטומטית
+APP_DIR="${HOME}/doge_bot"         # Change if needed
+PYMAIN="main.py"                   # Bot file
+PYDASH="dash_server.py"      # Dashboard file (if present)
+DEFAULT_PORT="${PORT:-8000}"       # Default dashboard port
+OPEN_DASHBOARD="${OPEN_DASHBOARD:-1}"  # 1=open browser automatically
 LOG_DIR="${APP_DIR}/logs"
 ENV_FILE="${APP_DIR}/.env"
 
@@ -91,16 +91,16 @@ run_dashboard () {
   echo "[RUN] Dashboard on ${url} (PORT=${PORT})"
   open_url "${url}"
 
-  # waitress אם אתה משתמש, אחרת flask רגיל
+  # If waitress installed use it; else fallback to file's own server run
   if python3 -c "import waitress" >/dev/null 2>&1; then
     python3 - <<PY
 from waitress import serve
 from importlib import import_module
-app = import_module("${PYDASH%.*}").app  # מניח שיש app
+app = import_module("${PYDASH%.*}").app  # Assumes an 'app' object
 serve(app, host="0.0.0.0", port=int("${port}"))
 PY
   else
-    # נפוץ אצלך: קובץ הדשבורד מריץ את השרת בעצמו
+  # Common case: dashboard file runs server itself
     python3 "${PYDASH}"
   fi
 }
@@ -108,12 +108,12 @@ PY
 usage () {
   cat <<USAGE
 Usage: $(basename "$0") [bot|dashboard|both]
-  bot        - מריץ את הבוט (main.py)
-  dashboard  - מריץ רק את הדשבורד ופותח דפדפן (אם OPEN_DASHBOARD=1)
-  both       - מריץ בוט + דשבורד במקביל (טב אחד למסחר, טב אחד לדשבורד)
+  bot        - run the bot (main.py)
+  dashboard  - run only the dashboard and open browser (if OPEN_DASHBOARD=1)
+  both       - run bot + dashboard (one tab trading, one tab dashboard)
 Vars:
   APP_DIR=${APP_DIR}
-  PORT=${DEFAULT_PORT} (יחפש פורט פנוי אם תפוס)
+  PORT=${DEFAULT_PORT} (will search nearby free port if taken)
   OPEN_DASHBOARD=${OPEN_DASHBOARD}
 USAGE
 }

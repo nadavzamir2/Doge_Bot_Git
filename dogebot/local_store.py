@@ -80,9 +80,60 @@ def record_fill(order_id: str, side: str, price: float, amount: float, status: s
     hist.append(base)
     _write(ORDER_HISTORY_FILE, hist[-500:])  # cap
 
+def set_history(rows: list[dict]) -> None:
+    """Overwrite history file safely with provided rows (dedup + cap)."""
+    try:
+        # Deduplicate by (id,time,side,price,amount,status)
+        seen = set()
+        cleaned = []
+        for r in rows:
+            key = (
+                r.get('id'), r.get('time'), r.get('side'),
+                round(float(r.get('price',0.0)), 10),
+                round(float(r.get('amount',0.0)), 10),
+                r.get('status'),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(r)
+        _write(ORDER_HISTORY_FILE, cleaned[-5000:])  # raise cap for extended history
+    except Exception:
+        pass
+
+def merge_history(new_rows: list[dict]) -> list[dict]:
+    """Merge new rows into existing history, persist, and return merged list."""
+    existing = list_history()
+    # Build key set for fast dedup
+    keys = {
+        (
+            r.get('id'), r.get('time'), r.get('side'),
+            round(float(r.get('price',0.0)),10),
+            round(float(r.get('amount',0.0)),10),
+            r.get('status')
+        ) for r in existing
+    }
+    added = 0
+    for r in new_rows:
+        k = (
+            r.get('id'), r.get('time'), r.get('side'),
+            round(float(r.get('price',0.0)),10),
+            round(float(r.get('amount',0.0)),10),
+            r.get('status')
+        )
+        if k not in keys:
+            existing.append(r)
+            keys.add(k)
+            added += 1
+    if added:
+        set_history(existing)
+    return existing
+
 __all__ = [
     "add_open_order",
     "record_fill",
     "list_open_orders",
     "list_history",
+    "set_history",
+    "merge_history",
 ]

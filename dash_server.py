@@ -11,131 +11,101 @@ DOGE Grid Monitor Dashboard (single file)
 - Y axis ticks follow grid layer prices (full price, not shortened)
 - Live price via SSE (/stream) and *live stats via SSE on file-change* of runtime_stats.json
 - Persistent history via /history (saved to ~/doge_bot/data/price_history.json)
-- /api/open_orders  ו-/api/order_history עם מיון/סינון בצד לקוח
+- /api/open_orders and /api/order_history with client-side sort/filter
 - Local state for “Show grid layers” checkbox (localStorage)
 """
-
-import os
-import json
-import time
-import argparse
-import webbrowser
-import pathlib
-import threading
-from collections import deque
+import os, json, time, argparse, webbrowser, pathlib, threading
 from datetime import datetime
+from collections import deque
 from typing import Optional
-
-from flask import Flask, Response, jsonify, request, render_template_string, make_response
-from dotenv import load_dotenv
 import ccxt
+from flask import Flask, Response, jsonify, request, render_template_string, make_response
+from dotenv import load_dotenv as _load_dotenv_for_reload
+from config import (
+  API_KEY, API_SECRET, BASE_ORDER_USD, DATA_DIR, GRID_MAX, GRID_MIN, GRID_STEP_PCT,
+  HISTORY_FILE_PATH as HISTORY_FILE, MAX_USD_FOR_CYCLE, PROFIT_SPLIT_TRIGGER_USD,
+  RECV_WINDOW, REGION as BINANCE_REGION, SPLIT_CHUNK_USD, STATS_FILE_PATH as STATS_FILE,
+  TRADING_PAIR as PAIR, STATE_FILE_PATH, FORCE_LOCAL_DATA
+)
 try:
-  from dogebot import local_store  # refactored package path
+  from dogebot import local_store
 except Exception:
-  # fallback if running older layout
   try:
     import dogebot.local_store as local_store
   except Exception:
     local_store = None
 
-# =========================================================
-# ENV & CONSTANTS
-# =========================================================
-
-# =========================================================
-# ENV & CONSTANTS
-# =========================================================
-
-# Import centralized configuration
-try:
-    from config import (
-        API_KEY, API_SECRET, BASE_ORDER_USD, DATA_DIR, GRID_MAX, GRID_MIN, 
-        GRID_STEP_PCT, HISTORY_FILE_PATH as HISTORY_FILE, MAX_USD_FOR_CYCLE,
-        PROFIT_SPLIT_TRIGGER_USD, RECV_WINDOW, REGION as BINANCE_REGION,
-        SPLIT_CHUNK_USD, STATS_FILE_PATH as STATS_FILE, TRADING_PAIR as PAIR
-    )
-except ImportError:
-    # Fallback to local configuration if config.py is not available
-    from dotenv import load_dotenv
-    
-    ENV_FILE = os.path.expanduser("~/doge_bot/.env")
-    if not os.path.exists(ENV_FILE):
-        ENV_FILE = ".env"
-    load_dotenv(ENV_FILE)
-    
-    def _env_float(name: str):
-        v = os.getenv(name)
-        if v is None or v == "":
-            return None
-        try:
-            return float(v)
-        except Exception:
-            return None
-    
-    BINANCE_REGION = os.getenv("BINANCE_REGION", "com").strip().lower()
-    API_KEY = os.getenv("BINANCE_TRADE_KEY") or os.getenv("BINANCE_API_KEY") or ""
-    API_SECRET = os.getenv("BINANCE_TRADE_SECRET") or os.getenv("BINANCE_API_SECRET") or ""
-    RECV_WINDOW = int(os.getenv("BINANCE_RECVWINDOW", "10000"))
-    PAIR = os.getenv("PAIR", "DOGE/USDT").strip()
-    
-    GRID_MIN = _env_float("GRID_MIN")
-    GRID_MAX = _env_float("GRID_MAX")
-    GRID_STEP_PCT = _env_float("GRID_STEP_PCT")
-    
-    BASE_ORDER_USD = _env_float("BASE_ORDER_USD") or 0.0
-    MAX_USD_FOR_CYCLE = _env_float("MAX_USD_FOR_CYCLE") or 0.0
-    SPLIT_CHUNK_USD = _env_float("SPLIT_CHUNK_USD") or 4.0
-    
-    PROFIT_SPLIT_TRIGGER_USD = (
-        _env_float("PROFIT_SPLIT_TRIGGER_USD")
-        or _env_float("SPLIT_TRIGGER_USD")
-        or _env_float("PROFIT_TRIGGER_USD")
-        or 0.0
-    )
-    
-    DATA_DIR = pathlib.Path.home() / "doge_bot" / "data"
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    HISTORY_FILE = DATA_DIR / "price_history.json"
-    STATS_FILE = DATA_DIR / "runtime_stats.json"
-
-# Additional dashboard-specific configuration
-MAX_HISTORY = int(os.getenv("DASH_MAX_HISTORY", "10000"))  # max points kept in RAM/UI
-PRICE_WINDOW = deque([], maxlen=MAX_HISTORY)
+# Dashboard-specific runtime structures
+MAX_HISTORY = int(os.getenv("DASH_MAX_HISTORY", "10000"))
+from collections import deque as _deque
+PRICE_WINDOW = _deque([], maxlen=MAX_HISTORY)
 HISTORY_LOCK = threading.Lock()
-
-# For backward compatibility in API responses
 SPLIT_TRIGGER_ENV = PROFIT_SPLIT_TRIGGER_USD
-
 # =========================================================
 # CCXT CLIENT (public for price, private only if keys exist)
 # =========================================================
 
 def make_client():
-    if BINANCE_REGION == "us":
-        Cls = ccxt.binanceus
-    else:
-        Cls = ccxt.binance
-    kwargs = {
-        "enableRateLimit": True,
-        "options": {
-            "defaultType": "spot",
-            "adjustForTimeDifference": True,
-            # חשוב: לא למשוך SAPI של מטבעות בעת load_markets (דורש הרשאות ומפיל חלק מהמשתמשים)
-            "fetchCurrencies": False,
-        },
-    }
-    if API_KEY and API_SECRET:
-        kwargs["apiKey"] = API_KEY
-        kwargs["secret"] = API_SECRET
-    ex = Cls(kwargs)
-    try:
-        ex.load_markets()  # בלי פרמטרים (מונע -1104)
-    except Exception as e:
-        print(f"[WARN] load_markets failed: {e}")
-    return ex
+  if BINANCE_REGION == "us":
+    Cls = ccxt.binanceus
+  else:
+    Cls = ccxt.binance
+  kwargs = {
+    "enableRateLimit": True,
+    "options": {
+      "defaultType": "spot",
+      "adjustForTimeDifference": True,
+      # Important: don't fetch SAPI currencies during load_markets (needs extra perms and can fail for some users)
+      "fetchCurrencies": False,
+    },
+  }
+  if API_KEY and API_SECRET:
+    kwargs["apiKey"] = API_KEY
+    kwargs["secret"] = API_SECRET
+  ex = Cls(kwargs)
+  try:
+    ex.load_markets()  # No params (avoids -1104)
+  except Exception as e:
+    print(f"[WARN] load_markets failed: {e}")
+  return ex
 
 CLIENT = make_client()
 _PUBLIC_FALLBACK_CLIENT = None  # created lazily if auth client fails for public ticker
+
+# Dynamic credential reload support
+_CLIENT_LOCK = threading.Lock()
+_LAST_KEYS = (API_KEY or "", API_SECRET or "", BINANCE_REGION)
+
+def _maybe_reload_client():
+  """Reload ccxt client if .env keys changed (allows updating keys without restart).
+
+  We re-read environment (.env) and compare current API key/secret/region. If changed,
+  rebuild CLIENT (and reset fallback) under lock.
+  """
+  global CLIENT, API_KEY, API_SECRET, BINANCE_REGION, _PUBLIC_FALLBACK_CLIENT, _LAST_KEYS
+  try:
+    # Re-load .env (best effort)
+    _load_dotenv_for_reload(os.getenv("ENV_FILE") or os.path.expanduser("~/doge_bot/.env"), override=False)
+  except Exception:
+    pass
+  new_key = os.getenv("BINANCE_TRADE_KEY") or os.getenv("BINANCE_API_KEY") or API_KEY
+  new_secret = os.getenv("BINANCE_TRADE_SECRET") or os.getenv("BINANCE_API_SECRET") or API_SECRET
+  new_region = os.getenv("BINANCE_REGION", BINANCE_REGION)
+  current = (new_key or "", new_secret or "", new_region)
+  if current == _LAST_KEYS:
+    return
+  with _CLIENT_LOCK:
+    if current != _LAST_KEYS:  # re-check after acquiring
+      _LAST_KEYS = current
+      API_KEY = new_key
+      API_SECRET = new_secret
+      BINANCE_REGION = new_region
+      try:
+        CLIENT = make_client()  # rebuild
+        _PUBLIC_FALLBACK_CLIENT = None
+        print("[INFO] Rebuilt Binance client after key/region change")
+      except Exception as e:
+        print(f"[WARN] Failed to rebuild client: {e}")
 
 # =========================================================
 # HISTORY LOAD/SAVE
@@ -161,7 +131,7 @@ def _save_history_file():
         print(f"[WARN] failed saving history file: {e}")
 
 def _read_stats_file():
-    # אם הבוט שלך כותב לכאן, הדשבורד יציג; אחרת יוצגו אפסים.
+  # If the bot writes stats here they will display; otherwise zeros are shown.
     try:
         if STATS_FILE.exists():
             with STATS_FILE.open("r", encoding="utf-8") as f:
@@ -174,15 +144,15 @@ def _read_stats_file():
         "cumulative_profit_usd": 0.0,
         "splits_count": 0,
         "bnb_converted_usd": 0.0,
-        # ערכים אופציונליים לרווחים נוספים:
+  # Optional extra profit fields:
         "realized_profit_usd": 0.0,
         "unrealized_profit_usd": 0.0,
         "grid_profit_usd": 0.0,
         "fees_usd": 0.0,
         "profit_pct": 0.0,
-        # אפשרות שגם הטריגר ייכתב ע"י הבוט:
+  # The trigger can also be written directly by the bot:
         "split_trigger_usd": SPLIT_TRIGGER_ENV,
-        # לחלופין גם total_profit_usd אם קיים:
+  # total_profit_usd alternative if present:
         "total_profit_usd": 0.0,
     }
 
@@ -194,22 +164,28 @@ _load_history_file()
 
 _current_price = None
 _current_ts_ms = None
+_current_price_source = None  # 'auth', 'public', 'history'
 _sse_stop = threading.Event()
 
 _stats_mtime = None
 _stats_cache = None
 
-def record_price_point(price: float, ts_ms: Optional[int] = None):
-    """Append price point to history (memory + disk) and update current."""
-    global _current_price, _current_ts_ms
-    if ts_ms is None:
-        ts_ms = int(time.time() * 1000)
-    pt = {"t": int(ts_ms), "p": float(price)}
-    with HISTORY_LOCK:
-        PRICE_WINDOW.append(pt)
-        _save_history_file()
-    _current_price = float(price)
-    _current_ts_ms = int(ts_ms)
+def record_price_point(price: float, ts_ms: Optional[int] = None, source: Optional[str] = None):
+  """Append price point to history (memory + disk) and update current.
+
+  source: str (auth|public|history) for UI badge.
+  """
+  global _current_price, _current_ts_ms, _current_price_source
+  if ts_ms is None:
+    ts_ms = int(time.time() * 1000)
+  pt = {"t": int(ts_ms), "p": float(price)}
+  with HISTORY_LOCK:
+    PRICE_WINDOW.append(pt)
+    _save_history_file()
+  _current_price = float(price)
+  _current_ts_ms = int(ts_ms)
+  if source:
+    _current_price_source = source
 
 def _seed_initial_price():
   """Seed initial current price so dashboard shows a value immediately.
@@ -220,7 +196,7 @@ def _seed_initial_price():
   3. Try public fallback client fetch_ticker
   Silently ignore failures; dashboard will rely on poller later.
   """
-  global _current_price, _current_ts_ms, _PUBLIC_FALLBACK_CLIENT
+  global _current_price, _current_ts_ms, _PUBLIC_FALLBACK_CLIENT, _current_price_source
   if _current_price is not None:
     return
   # 1. history
@@ -229,6 +205,7 @@ def _seed_initial_price():
       last = PRICE_WINDOW[-1]
       _current_price = float(last["p"])
       _current_ts_ms = int(last["t"])
+      _current_price_source = 'history'
       return
   except Exception:
     pass
@@ -237,7 +214,7 @@ def _seed_initial_price():
     t = CLIENT.fetch_ticker(PAIR)
     price = t.get("last") or t.get("close") or t.get("bid") or t.get("ask")
     if price:
-      record_price_point(price)
+      record_price_point(price, source='auth')
       return
   except Exception:
     pass
@@ -259,7 +236,7 @@ def _seed_initial_price():
     t2 = _PUBLIC_FALLBACK_CLIENT.fetch_ticker(PAIR)
     p2 = t2.get("last") or t2.get("close") or t2.get("bid") or t2.get("ask")
     if p2:
-      record_price_point(p2)
+      record_price_point(p2, source='public')
   except Exception:
     pass
 
@@ -267,10 +244,11 @@ def _price_poller():
   """Fetch latest price every few seconds to keep chart moving (even without bot)."""
   while not _sse_stop.is_set():
     try:
+      _maybe_reload_client()
       t = CLIENT.fetch_ticker(PAIR)
       price = t.get("last") or t.get("close") or t.get("bid") or t.get("ask")
       if price:
-        record_price_point(price)
+        record_price_point(price, source='auth')
     except Exception:
       global _PUBLIC_FALLBACK_CLIENT
       try:
@@ -290,7 +268,7 @@ def _price_poller():
         t2 = _PUBLIC_FALLBACK_CLIENT.fetch_ticker(PAIR)
         p2 = t2.get("last") or t2.get("close") or t2.get("bid") or t2.get("ask")
         if p2:
-          record_price_point(p2)
+          record_price_point(p2, source='public')
       except Exception:
         pass
     _sse_stop.wait(3.0)
@@ -315,7 +293,7 @@ def _sse_generator():
     while not _sse_stop.is_set():
         # price ticks (every ~2s or when changes)
         if _current_price is not None:
-            payload = {"t": _current_ts_ms or int(time.time() * 1000), "p": _current_price}
+            payload = {"t": _current_ts_ms or int(time.time() * 1000), "p": _current_price, "s": _current_price_source}
             js = json.dumps(payload, ensure_ascii=False)
             if js != last_sent_tick:
                 yield f"event: tick\ndata: {js}\n\n"
@@ -330,7 +308,7 @@ def _sse_generator():
                     split_trigger = float(stats.get("split_trigger_usd", SPLIT_TRIGGER_ENV) or 0.0)
                 except Exception:
                     split_trigger = SPLIT_TRIGGER_ENV
-                # קבע מדיניות רווח להצגה: total_profit_usd אם קיים, אחרת cumulative_profit_usd
+                # Decide which profit metric to show: prefer total_profit_usd else fallback to cumulative_profit_usd
                 profit_live = stats.get("total_profit_usd", None)
                 if profit_live is None:
                     profit_live = stats.get("cumulative_profit_usd", 0.0)
@@ -428,7 +406,7 @@ def api_initial_investments():
 @app.get("/api/stats")
 def api_stats():
     stats = _read_stats_file()
-    # החזר גם את כל סוגי הרווחים אם קיימים
+  # Also return all individual profit components if present
     split_trigger = stats.get("split_trigger_usd", SPLIT_TRIGGER_ENV)
     return {
         "price": _current_price,
@@ -450,6 +428,29 @@ def api_stats():
 def _auth_available():
     return bool(API_KEY and API_SECRET)
 
+def _extract_binance_code(exc: Exception) -> dict:
+  """Attempt to extract Binance error code/message from ccxt exception text/info."""
+  code = None
+  msg = None
+  try:
+    # ccxt exceptions often have .args[0] as a JSON-ish string
+    txt = str(exc)
+    # simple patterns
+    import re
+    m = re.search(r'"code"\s*:\s*(-?\d+)', txt)
+    if not m:
+      m = re.search(r"'code'\s*:\s*(-?\d+)", txt)
+    if m:
+      code = int(m.group(1))
+    mm = re.search(r'"msg"\s*:\s*"(.*?)"', txt)
+    if not mm:
+      mm = re.search(r"'msg'\s*:\s*'([^']+)" , txt)
+    if mm:
+      msg = mm.group(1)
+  except Exception:
+    pass
+  return {"binance_code": code, "binance_msg": msg}
+
 @app.get("/api/open_orders")
 def api_open_orders():
   if not _auth_available():
@@ -457,6 +458,7 @@ def api_open_orders():
       return {"ok": True, "source": "local", "orders": local_store.list_open_orders()}
     return {"ok": False, "error": "No API key/secret configured", "orders": []}
   try:
+    _maybe_reload_client()
     orders = CLIENT.fetch_open_orders(PAIR, params={"recvWindow": RECV_WINDOW})
     out = []
     for o in orders:
@@ -476,78 +478,348 @@ def api_open_orders():
       })
     return {"ok": True, "orders": out}
   except Exception as e:
-    return {"ok": False, "error": str(e), "orders": []}
+    details = _extract_binance_code(e)
+    # On auth failure (-2015) or any error, fallback to local
+    if local_store:
+      loc = local_store.list_open_orders()
+      if loc:
+        return {"ok": True, "source": "local", "orders": loc, "error": str(e), **details}
+    return {"ok": False, "error": str(e), **details, "orders": []}
 
 @app.get("/api/order_history")
 def api_order_history():
-  if not _auth_available():
+  """Return order history with optional merge & enrichment.
+
+  Query params:
+    limit: max rows to return (default 500)
+    full=1: raise cap to 2000
+    include=trades,state: force enrichment sources
+    merge=0: disable merge with local history file
+    enrich=0: disable enrichment (trades/state)
+    statuses=all or comma list: filter statuses (default closed,filled,canceled)
+    debug=1: include debug stats
+  """
+  display_limit = int(request.args.get("limit", "500") or 500)
+  want_full = request.args.get("full") in ("1","true","True")
+  max_return = 2000 if want_full else max(100, min(display_limit, 2000))
+  include_arg = request.args.get("include", "").strip().lower()
+  include_set = {p.strip() for p in include_arg.split(',') if p.strip()}
+  merge_enabled = request.args.get("merge", "1") not in ("0","false","False")
+  enrich_enabled = request.args.get("enrich", "1") not in ("0","false","False")
+  debug_mode = request.args.get("debug") in ("1","true","True")
+  statuses_param = request.args.get("statuses", "")
+  if statuses_param:
+    if statuses_param.lower() == 'all':
+      allowed_statuses = None
+    else:
+      allowed_statuses = {s.strip().lower() for s in statuses_param.split(',') if s.strip()}
+      if not allowed_statuses:
+        allowed_statuses = {"closed","filled","canceled"}
+  else:
+    allowed_statuses = {"closed","filled","canceled"}
+  ENRICH_THRESHOLD = 40
+
+  # Local-only path (no auth or forced)
+  if not _auth_available() or FORCE_LOCAL_DATA:
     if local_store:
-      return {"ok": True, "source": "local", "orders": local_store.list_history()}
+      rows = local_store.list_history()
+      return {"ok": True, "source": "local", "orders": rows[-max_return:], "total": len(rows)}
     return {"ok": False, "error": "No API key/secret configured", "orders": []}
-  out = []
+
+  all_rows: list[dict] = []
+  raw_total = 0
+  filtered_out = 0
+  batch_meta = [] if debug_mode else None
   try:
-    orders = CLIENT.fetch_orders(PAIR, limit=50, params={"recvWindow": RECV_WINDOW})
-    for o in orders:
-      status = (o.get("status") or "").lower()
-      if status not in ("closed", "filled", "canceled"):
-        continue
-
-      # Placement timestamp
-      placement_ts = o.get("timestamp") or o.get("datetime")
-      if isinstance(placement_ts, (int, float)):
-        placement_ts_iso = datetime.utcfromtimestamp(placement_ts / 1000.0).isoformat() + "Z"
-      else:
-        placement_ts_iso = str(placement_ts)
-
-      # Execution timestamp
-      execution_ts = o.get("lastTradeTimestamp")
-      if not execution_ts and o.get("info"):
-        execution_ts = o.get("info", {}).get("updateTime")
-      if not execution_ts:
-        execution_ts = placement_ts
-
-      if isinstance(execution_ts, (int, float)):
-        execution_ts_iso = datetime.utcfromtimestamp(execution_ts / 1000.0).isoformat() + "Z"
-      else:
-        execution_ts_iso = str(execution_ts)
-
-      price = float(o.get("price") or o.get("average") or 0)
-      amount = float(o.get("amount") or o.get("filled") or 0)
-      out.append({
-        "time": placement_ts_iso,
-        "execution_time": execution_ts_iso,
-        "side": o.get("side"),
-        "price": price,
-        "amount": amount,
-        "value_usdt": price * amount,
-        "status": status,
-      })
-    return {"ok": True, "orders": out}
-  except Exception:
-    # fallback: trades
-    try:
-      trades = CLIENT.fetch_my_trades(PAIR, limit=50, params={"recvWindow": RECV_WINDOW})
-      for t in trades:
-        execution_ts = t.get("timestamp") or t.get("datetime")
-        if isinstance(execution_ts, (int, float)):
-          execution_ts_iso = datetime.utcfromtimestamp(execution_ts / 1000.0).isoformat() + "Z"
+    _maybe_reload_client()
+    end_time = None
+    batch_limit = 100
+    for _ in range(25):
+      params = {"recvWindow": RECV_WINDOW}
+      if end_time is not None:
+        params["endTime"] = end_time - 1
+      try:
+        batch = CLIENT.fetch_orders(PAIR, limit=batch_limit, params=params) or []
+      except Exception as e_fetch:
+        if not all_rows:
+          raise e_fetch
+        break
+      if not batch:
+        break
+      oldest_seen = None
+      raw_total += len(batch)
+      for o in batch:
+        status = (o.get("status") or "").lower()
+        if allowed_statuses is not None and status not in allowed_statuses:
+          filtered_out += 1
+          continue
+        placement_ts = o.get("timestamp") or o.get("datetime")
+        exec_ts = o.get("lastTradeTimestamp") or (o.get("info", {}) if o.get("info") else {}).get("updateTime") or placement_ts
+        if isinstance(placement_ts,(int,float)):
+          placement_iso = datetime.utcfromtimestamp(placement_ts/1000.0).isoformat()+"Z"
         else:
-          execution_ts_iso = str(execution_ts)
-        placement_ts_iso = "—"
-        price = float(t.get("price") or 0)
-        amount = float(t.get("amount") or 0)
-        out.append({
-          "time": placement_ts_iso,
-          "execution_time": execution_ts_iso,
-          "side": t.get("side"),
+          placement_iso = str(placement_ts)
+        if isinstance(exec_ts,(int,float)):
+          exec_iso = datetime.utcfromtimestamp(exec_ts/1000.0).isoformat()+"Z"
+        else:
+          exec_iso = str(exec_ts)
+        price = float(o.get("price") or o.get("average") or 0)
+        amount = float(o.get("amount") or o.get("filled") or 0)
+        all_rows.append({
+          "id": o.get("id") or o.get("clientOrderId") or o.get("orderId"),
+          "time": placement_iso,
+          "execution_time": exec_iso,
+          "side": o.get("side"),
           "price": price,
           "amount": amount,
           "value_usdt": price * amount,
-          "status": "done",
+          "status": status,
         })
-      return {"ok": True, "orders": out}
+        if isinstance(placement_ts,(int,float)):
+          if oldest_seen is None or placement_ts < oldest_seen:
+            oldest_seen = placement_ts
+      if oldest_seen is None:
+        break
+      end_time = oldest_seen
+      if len(all_rows) >= max_return:
+        break
+      if len(all_rows) > 500:
+        batch_limit = 200
+      if debug_mode:
+        batch_meta.append({"fetched": len(batch), "kept": len(all_rows), "oldest_ts": oldest_seen})
+
+    enrich_sources = []
+    # Enrich with trades
+    if enrich_enabled and ((len(all_rows) < ENRICH_THRESHOLD) or ("trades" in include_set)):
+      try:
+        trades = CLIENT.fetch_my_trades(PAIR, limit=1000, params={"recvWindow": RECV_WINDOW}) or []
+        seen = { (r.get('id'), r.get('time'), r.get('side'), r.get('status')) for r in all_rows }
+        added = 0
+        for t in trades:
+          exec_ts = t.get("timestamp") or t.get("datetime")
+          if isinstance(exec_ts,(int,float)):
+            exec_iso = datetime.utcfromtimestamp(exec_ts/1000.0).isoformat()+"Z"
+          else:
+            exec_iso = str(exec_ts)
+          price = float(t.get("price") or 0)
+          amount = float(t.get("amount") or 0)
+          row = {
+            "id": t.get("id") or t.get("tradeId"),
+            "time": "—",
+            "execution_time": exec_iso,
+            "side": t.get("side"),
+            "price": price,
+            "amount": amount,
+            "value_usdt": price * amount,
+            "status": "done",
+          }
+          key = (row['id'], row['time'], row['side'], row['status'])
+          if key in seen:
+            continue
+          all_rows.append(row)
+          seen.add(key)
+          added += 1
+        if added:
+          enrich_sources.append(f"trades(+{added})")
+      except Exception:
+        pass
+
+    # Enrich with state sells
+    if enrich_enabled and ((len(all_rows) < ENRICH_THRESHOLD) or ("state" in include_set)):
+      try:
+        if STATE_FILE_PATH and os.path.exists(STATE_FILE_PATH):
+          with open(STATE_FILE_PATH,'r',encoding='utf-8') as f:
+            st = json.load(f)
+          sell_fills = (st or {}).get('sell_fills', {})
+          seen = { (r.get('id'), r.get('time'), r.get('side'), r.get('status')) for r in all_rows }
+          added = 0
+          for sid, info in sell_fills.items():
+            price = float(info.get('price',0.0))
+            amt = float(info.get('amount',0.0))
+            row = {
+              'id': sid,
+              'time': '—',
+              'execution_time': '—',
+              'side': 'sell',
+              'price': price,
+              'amount': amt,
+              'value_usdt': price * amt,
+              'status': 'done'
+            }
+            key = (row['id'], row['time'], row['side'], row['status'])
+            if key in seen:
+              continue
+            all_rows.append(row)
+            seen.add(key)
+            added += 1
+          if added:
+            enrich_sources.append(f"state(+{added})")
+      except Exception:
+        pass
+
+    source = "live"
+    if merge_enabled and local_store and hasattr(local_store, 'merge_history'):
+      merged = local_store.merge_history(all_rows)
+      total = len(merged)
+      resp = {"ok": True, "source": source, "orders": merged[-max_return:], "total": total, "enrich": enrich_sources}
+    else:
+      total = len(all_rows)
+      resp = {"ok": True, "source": source, "orders": all_rows[-max_return:], "total": total, "enrich": enrich_sources}
+    if debug_mode:
+      resp['debug'] = {
+        'raw_total': raw_total,
+        'filtered_out': filtered_out,
+        'kept': total,
+        'allowed_statuses': None if allowed_statuses is None else sorted(list(allowed_statuses)),
+        'batches': batch_meta,
+      }
+    return resp
+  except Exception as e:
+    details = _extract_binance_code(e)
+    try:
+      trades = CLIENT.fetch_my_trades(PAIR, limit=100, params={"recvWindow": RECV_WINDOW}) or []
+      parsed = []
+      for t in trades:
+        exec_ts = t.get("timestamp") or t.get("datetime")
+        if isinstance(exec_ts,(int,float)):
+          exec_iso = datetime.utcfromtimestamp(exec_ts/1000.0).isoformat()+"Z"
+        else:
+          exec_iso = str(exec_ts)
+        price = float(t.get("price") or 0)
+        amount = float(t.get("amount") or 0)
+        parsed.append({
+          'id': t.get('id') or t.get('tradeId'),
+          'time': '—',
+          'execution_time': exec_iso,
+          'side': t.get('side'),
+          'price': price,
+          'amount': amount,
+          'value_usdt': price * amount,
+          'status': 'done'
+        })
+      if merge_enabled and local_store and hasattr(local_store,'merge_history') and parsed:
+        merged = local_store.merge_history(parsed)
+        return {"ok": True, "source": "trades_fallback", "orders": merged[-max_return:], "error": str(e), **details, "total": len(merged)}
+      return {"ok": True, "source": "trades_fallback", "orders": parsed[-max_return:], "error": str(e), **details, "total": len(parsed)}
     except Exception as e2:
-      return {"ok": False, "error": str(e2), "orders": []}
+      details2 = _extract_binance_code(e2)
+      if local_store:
+        loc = local_store.list_history()
+        if loc:
+          return {"ok": True, "source": "local", "orders": loc[-max_return:], "error": str(e2), **details2, "total": len(loc)}
+      try:
+        if STATE_FILE_PATH and os.path.exists(STATE_FILE_PATH):
+          with open(STATE_FILE_PATH,'r',encoding='utf-8') as f:
+            st = json.load(f)
+          sell_fills = (st or {}).get('sell_fills', {})
+          synth = []
+          for sid, info in sell_fills.items():
+            price = float(info.get('price',0.0))
+            amt = float(info.get('amount',0.0))
+            synth.append({
+              'id': sid,
+              'time': '—',
+              'execution_time': '—',
+              'side': 'sell',
+              'price': price,
+              'amount': amt,
+              'value_usdt': price * amt,
+              'status': 'done'
+            })
+          if synth:
+            if merge_enabled and local_store and hasattr(local_store,'merge_history'):
+              merged = local_store.merge_history(synth)
+              return {"ok": True, "source": "synthetic_state", "orders": merged[-max_return:], "error": str(e2), **details2, "total": len(merged)}
+            return {"ok": True, "source": "synthetic_state", "orders": synth[-max_return:], "error": str(e2), **details2, "total": len(synth)}
+      except Exception:
+        pass
+  return {"ok": False, "error": str(e2), **details2, "orders": [], "total": 0}
+
+@app.get("/api/auth_status")
+def api_auth_status():
+  """Report current auth health and whether keys are loaded.
+
+  Returns fields:
+    has_keys: bool
+    last_error: str|None
+    region: str
+    using_public_fallback: bool
+  """
+  has_keys = bool(API_KEY and API_SECRET)
+  health = {
+    "has_keys": has_keys,
+    "region": BINANCE_REGION,
+    "using_public_fallback": _PUBLIC_FALLBACK_CLIENT is not None,
+    "last_error": None,
+  }
+  if has_keys:
+    try:
+      _maybe_reload_client()
+      CLIENT.check_required_credentials()
+      # lightweight private call: fetch_balance (may raise -2015 fast)
+      CLIENT.fetch_status()  # uses public; cheaper than balance
+    except Exception as e:
+      health["last_error"] = str(e)[:200]
+  return health
+
+@app.post("/api/reload_keys")
+def api_reload_keys():
+  _maybe_reload_client()
+  return {"ok": True, "has_keys": bool(API_KEY and API_SECRET), "region": BINANCE_REGION}
+
+@app.get("/api/diagnose_auth")
+def api_diagnose_auth():
+  """Perform deeper auth diagnostics to help get real (non-fallback) data.
+
+  Tries a sequence of private endpoints and reports individual results. This helps
+  distinguish common causes of -2015 (bad key / IP / permissions) vs timing issues.
+  """
+  steps = []
+  if not _auth_available():
+    return {"ok": False, "error": "missing_keys", "hint": "Set BINANCE_TRADE_KEY / BINANCE_TRADE_SECRET then POST /api/reload_keys"}
+  _maybe_reload_client()
+  # 1. check credentials object
+  try:
+    CLIENT.check_required_credentials()
+    steps.append({"step": "check_required_credentials", "ok": True})
+  except Exception as e:
+    steps.append({"step": "check_required_credentials", "ok": False, "error": str(e)})
+  # 2. fetch_time (public)
+  try:
+    server_time = CLIENT.fetch_time()
+    steps.append({"step": "fetch_time", "ok": True, "server_time": server_time})
+  except Exception as e:
+    steps.append({"step": "fetch_time", "ok": False, "error": str(e)})
+  # 3. fetch_status (public)
+  try:
+    status = CLIENT.fetch_status()
+    steps.append({"step": "fetch_status", "ok": True, "status": status})
+  except Exception as e:
+    steps.append({"step": "fetch_status", "ok": False, "error": str(e)})
+  # 4. private call: fetch_balance
+  try:
+    bal = CLIENT.fetch_balance(params={"recvWindow": RECV_WINDOW})
+    steps.append({"step": "fetch_balance", "ok": True, "keys": list(bal.keys())[:8]})
+  except Exception as e:
+    info = _extract_binance_code(e)
+    steps.append({"step": "fetch_balance", "ok": False, "error": str(e), **info})
+  # 5. private call: fetch_open_orders
+  try:
+    oo = CLIENT.fetch_open_orders(PAIR, params={"recvWindow": RECV_WINDOW})
+    steps.append({"step": "fetch_open_orders", "ok": True, "count": len(oo)})
+  except Exception as e:
+    info = _extract_binance_code(e)
+    steps.append({"step": "fetch_open_orders", "ok": False, "error": str(e), **info})
+  # 6. private call: fetch_my_trades (limit=1)
+  try:
+    tr = CLIENT.fetch_my_trades(PAIR, limit=1, params={"recvWindow": RECV_WINDOW})
+    steps.append({"step": "fetch_my_trades", "ok": True, "count": len(tr)})
+  except Exception as e:
+    info = _extract_binance_code(e)
+    steps.append({"step": "fetch_my_trades", "ok": False, "error": str(e), **info})
+  # summarize
+  overall_ok = all(s.get("ok") for s in steps if s["step"] not in ("fetch_open_orders","fetch_my_trades"))
+  return {"ok": overall_ok, "steps": steps, "region": BINANCE_REGION}
 
 @app.post("/api/stop_bot")
 def api_stop_bot():
@@ -707,62 +979,77 @@ HTML = r"""<!doctype html>
   .grid-boundary {
     color: #8b5cf6 !important;
   }
+  .src-badge { display:inline-block; margin-left:6px; padding:2px 6px; font-size:10px; border-radius:6px; background:#edf2f7; color:#2d3748; border:1px solid #cbd5e0; font-weight:600; letter-spacing:.5px; text-transform:uppercase; }
+  .src-badge.local { background:#fffbea; border-color:#fbd38d; color:#975a16; }
+  .src-badge.synthetic_state { background:#ebf8ff; border-color:#90cdf4; color:#2b6cb0; }
+  .src-badge.error { background:#ffecec; border-color:#feb2b2; color:#c53030; }
+  .src-badge.hidden { display:none; }
+  .auth-ok { background:#e6fffa; border-color:#81e6d9; color:#046c4e; }
+  .auth-missing { background:#fffbea; border-color:#fbd38d; color:#975a16; }
+  .auth-error { background:#ffecec; border-color:#feb2b2; color:#c53030; }
 </style>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
   <div class="wrap">
     <div class="topbar">
-      <h1>DOGE Grid Monitor — <span id="pair" class="mono"></span> <span id="lastUpdated" class="last-update">Last updated —</span></h1>
+  <h1>DOGE Grid Monitor — <span id="pair" class="mono"></span> <span id="lastUpdated" class="last-update">Last updated —</span> <span id="authStatus" class="src-badge hidden" title="Authentication status"></span></h1>
       <div class="top-actions">
-        <button id="btnRefresh" class="icon-btn" title="Refresh all data (orders, history, stats)">🔄</button>
+        <div class="toolbar-group">
+          <button id="btnRefresh" class="icon-btn" title="Refresh all data (orders, history, stats)">🔄</button>
+          <label for="autoRefreshMs" class="small-label" title="Auto refresh interval (ms) for stats & tables">⏱</label>
+          <input id="autoRefreshMs" type="number" min="5000" step="1000" value="25000" style="width:90px" title="Auto refresh interval in milliseconds">
+          <button id="btnApplyInterval" class="icon-btn" title="Apply interval">✅</button>
+          <button id="btnExportCSV" class="icon-btn" title="Download history as CSV">💾</button>
+        </div>
         <button id="btnStop" class="icon-btn" title="Stop the trading bot">⏹️</button>
         <button id="btnResume" class="icon-btn" title="Resume the trading bot">▶️</button>
         <button id="btnCancel" class="icon-btn" title="Cancel all open orders">❌</button>
+  <button id="btnReloadKeys" class="icon-btn" title="Reload API keys from .env and refresh clients">🔐</button>
       </div>
     </div>
 
     <!-- Top info cards -->
     <div class="cards">
       <!-- New info boxes for initial investments -->
-      <div class="card" data-tooltip="Total USDT amount initially invested in the trading bot">
+  <div class="card" data-tooltip="Total starting USDT committed when the bot began (excludes unrealized changes)">
         <h3>Initial USDT Invested</h3>
         <div id="initialUsdtVal" class="v mono">—</div>
       </div>
 
-      <div class="card" data-tooltip="Total DOGE amount initially invested and its equivalent USDT value at time of investment">
+  <div class="card" data-tooltip="Initial DOGE quantity deposited (shown in DOGE; value at entry used for base exposure calculations)">
         <h3>Initial DOGE Invested</h3>
         <div id="initialDogeVal" class="v mono">—</div>
       </div>
 
       <!-- Bot Range card -->
-      <div class="card">
+  <div class="card" data-tooltip="Configured grid trading range (MIN to MAX price) within which orders are placed">
         <h3>Bot Range</h3>
         <div id="rangeVal" class="v mono">—</div>
-        <div class="subnote">Layer spacing: <span id="spacingVal">—</span>% • <span id="layersCountVal">—</span> layers</div>
+  <div class="subnote" data-tooltip="Distance between adjacent grid layers as percentage; total number of active price layers">Layer spacing: <span id="spacingVal">—</span>% • <span id="layersCountVal">—</span> layers</div>
       </div>
 
-      <div class="card"><h3>Current Price</h3><div id="priceVal" class="v mono">—</div></div>
+  <div class="card" data-tooltip="Latest market price fetched (source badge shows origin: exchange or local)"><h3>Current Price <span id="priceSource" class="src-badge hidden" title="Price source"></span></h3><div id="priceVal" class="v mono">—</div></div>
 
       <!-- Total Profit card with (profit/trigger) subnote -->
-      <div class="card">
+  <div class="card" data-tooltip="Aggregated realized + unrealized profit in USD (updates with fills and mark-to-market)">
         <h3>Total Profit (USD)</h3>
         <div id="profitVal" class="v mono">—</div>
-        <div class="subnote" id="profitTriggerNote">(— / 4.0$ chunk trigger)</div>
+  <div class="subnote" id="profitTriggerNote" data-tooltip="Progress toward next profit split action / chunk threshold">(— / 4.0$ chunk trigger)</div>
       </div>
 
-      <div class="card"><h3>Sell Trades Count</h3><div id="sellTradesVal" class="v mono">—</div></div>
-      <div class="card"><h3>Actual Splits Count</h3><div id="actualSplitsVal" class="v mono">—</div></div>
-      <div class="card"><h3>Converted to BNB (USD)</h3><div id="bnbVal" class="v mono">—</div></div>
+  <div class="card" data-tooltip="Number of sell executions completed since session start / tracking reset"><h3>Sell Trades Count</h3><div id="sellTradesVal" class="v mono">—</div></div>
+  <div class="card" data-tooltip="How many profit split transfers actually executed (successful conversions)"><h3>Actual Splits Count</h3><div id="actualSplitsVal" class="v mono">—</div></div>
+  <div class="card" data-tooltip="USD value of DOGE proceeds converted into BNB for fee optimization or bookkeeping"><h3>Converted to BNB (USD)</h3><div id="bnbVal" class="v mono">—</div></div>
     </div>
 
-    <!-- EXTRA profit cards (values only; לא נוגעים בשאר) -->
+  <!-- EXTRA profit cards (values only; leave others untouched) -->
     <div class="cards">
-      <div class="card"><h3>Realized Profit (USD)</h3><div id="profitRealizedVal" class="v mono">—</div></div>
-      <div class="card"><h3>Unrealized Profit (USD)</h3><div id="profitUnrealizedVal" class="v mono">—</div></div>
-      <div class="card"><h3>Grid Profit (USD)</h3><div id="profitGridVal" class="v mono">—</div></div>
-      <div class="card"><h3>Fees (USD)</h3><div id="feesVal" class="v mono">—</div></div>
-      <div class="card"><h3>Profit %</h3><div id="profitPctVal" class="v mono">—</div></div>
+  <div class="card" data-tooltip="Profit locked in from closed trades (excludes open position PnL)"><h3>Realized Profit (USD)</h3><div id="profitRealizedVal" class="v mono">—</div></div>
+  <div class="card" data-tooltip="Mark-to-market profit on current inventory relative to initial cost basis"><h3>Unrealized Profit (USD)</h3><div id="profitUnrealizedVal" class="v mono">—</div></div>
+  <div class="card" data-tooltip="Cumulative profit generated by grid fills alone (excluding conversions/splits)"><h3>Grid Profit (USD)</h3><div id="profitGridVal" class="v mono">—</div></div>
+  <div class="card" data-tooltip="Estimated or reported trading fees paid (converted to USD)"><h3>Fees (USD)</h3><div id="feesVal" class="v mono">—</div></div>
+  <div class="card" data-tooltip="Overall return percentage relative to initial total capital deployed"><h3>Profit %</h3><div id="profitPctVal" class="v mono">—</div></div>
     </div>
 
     <div class="sections">
@@ -790,7 +1077,13 @@ HTML = r"""<!doctype html>
               <span style="color: #666;">Gray Latitudes</span>
             </span>
           </div>
-          <div style="display:flex;gap:12px;margin-bottom:8px;flex-wrap:wrap">
+          <style>
+            .control-row { display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; }
+            .ctrl { display:flex; align-items:center; gap:6px; user-select:none; }
+            .ctrl-marker span { font-family: 'Courier New', monospace; font-weight:500; letter-spacing:0.3px; font-size:11px; color:#ff5c99; opacity:0.85; }
+            .control-row .spacer { flex:1 1 auto; }
+          </style>
+          <div class="control-row">
             <label style="display:flex;align-items:center;gap:6px;user-select:none">
               <input id="showGrid" type="checkbox" checked/>
               <span>Show grid layers</span>
@@ -803,14 +1096,29 @@ HTML = r"""<!doctype html>
               <input id="showLat" type="checkbox" checked/>
               <span>Show gray latitudes</span>
             </label>
+            <label style="display:flex;align-items:center;gap:6px;user-select:none">
+              <input id="showPriceLine" type="checkbox" checked/>
+              <span>Show price line</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;user-select:none">
+              <input id="followPrice" type="checkbox"/>
+              <span>Follow price</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;user-select:none">
+              <input id="autoZoom" type="checkbox"/>
+              <span>Auto zoom</span>
+            </label>
+            <!-- legend toggle removed (always show price curve) -->
           </div>
-          <div id="chart"></div>
+          <div id="chartScroll" style="max-height:520px; overflow-y:auto; border:1px solid #eee; border-radius:4px;">
+            <div id="chart" style="height:520px;"></div>
+          </div>
         </div>
       </details>
 
       <!-- Open Orders -->
       <details open id="openBox">
-        <summary>Open Orders <span id="openCount" class="mono" style="color:var(--muted)">(0)</span></summary>
+        <summary>Open Orders <span id="openCount" class="mono" style="color:var(--muted)">(0)</span><span id="openSourceBadge" class="src-badge hidden" title="Data source"></span></summary>
         <div class="section-body">
           <!-- sort & filter controls -->
           <div class="controls">
@@ -850,7 +1158,7 @@ HTML = r"""<!doctype html>
 
       <!-- Orders History -->
       <details open id="histBox">
-        <summary>Orders History <span id="histCount" class="mono" style="color:var(--muted)">(0)</span></summary>
+        <summary>Orders History <span id="histCount" class="mono" style="color:var(--muted)">(0)</span><span id="histSourceBadge" class="src-badge hidden" title="Data source"></span></summary>
         <div class="section-body">
           <!-- sort & filter controls -->
           <div class="controls">
@@ -875,6 +1183,29 @@ HTML = r"""<!doctype html>
             </label>
           </div>
 
+          <div class="table-controls">
+              <select id="histSortBy">
+                <option value="time">Time</option>
+                <option value="side">Side</option>
+                <option value="status">Status</option>
+                <option value="price">Price</option>
+                <option value="amount">Amount</option>
+                <option value="value_usdt">Value</option>
+              </select>
+            </label>
+            <label>Direction
+              <select id="histSortDir">
+                <option value="desc">Desc</option>
+                <option value="asc">Asc</option>
+              </select>
+            </label>
+            <label>Filter
+              <input id="histFilter" placeholder="filter..." />
+            </label>
+             <button id="btnHistOlder" title="Fetch older history (paginate backwards)">⬇ Older</button>
+            <span id="histOlderSpinner" class="spinner" style="display:none">⏳</span>
+            </div>
+
           <table id="histTbl">
             <thead><tr>
               <th>Time</th>
@@ -896,7 +1227,7 @@ HTML = r"""<!doctype html>
 <script>
 "use strict";
 
-var showGridEl, showActiveEl, showLatEl;
+var showGridEl, showActiveEl, showLatEl, autoZoomEl, showPriceLineEl; // controls including auto-zoom + price line toggle
 
 const PAIR = {{ pair|tojson }};
 const SPLIT_TRIGGER_ENV = {{ split_trigger_env|tojson }};
@@ -985,7 +1316,7 @@ function buildAllLevels(){
   if (!(min > 0) || !(max > min) || !(step > 0)) return [];
   const levels = [min];
   let p = min;
-  const limit = 2000; // הגנה
+  const limit = 2000; // safety guard
   let guard = 0;
   while (guard++ < limit){
     const next = p * (1 + step);
@@ -1147,9 +1478,13 @@ function initializeCardLoadingStates() {
 
 /* ===== stats (polling fallback) ===== */
 async function loadStats(){
-  // Show loading indicators for slow-loading cards
-  setLoadingState('profitVal');
-  setLoadingState('sellTradesVal');
+  // Only show loading indicators the first time (avoid flicker / delay perception)
+  if(!isCardInitialized('profitVal') && !isCardLoading('profitVal')){
+    setLoadingState('profitVal');
+  }
+  if(!isCardInitialized('sellTradesVal') && !isCardLoading('sellTradesVal')){
+    setLoadingState('sellTradesVal');
+  }
   
   try{
     const r = await fetch('/api/stats');
@@ -1315,13 +1650,25 @@ async function loadHistory(){
         tickmode: (yTicksVals.length? 'array':'auto'),
         tickvals: (yTicksVals.length? yTicksVals: undefined),
         ticktext: (yTicksVals.length? yTicksText: undefined),
-        hoverformat: ".6f"
+    hoverformat: ".6f",
+        // range set below dynamically
       },
       paper_bgcolor:'rgba(0,0,0,0)',
       plot_bgcolor:'rgba(0,0,0,0)',
       shapes: []
     };
-    const data = [{ x: xs, y: ys, mode:'lines', name: PAIR }];
+    // Apply dynamic padded range
+    if (GRID_MIN != null && GRID_MAX != null) {
+      layout.yaxis.range = (function(){
+        const span = GRID_MAX - GRID_MIN;
+        const pad = span * 0.03; // 3% padding
+        return [GRID_MIN - pad, GRID_MAX + pad];
+      })();
+    }
+    const data = [
+      { x: xs, y: ys, mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'} },
+  { x:[xs[xs.length-1]], y:[ys[ys.length-1]], mode:'markers', name:'price', marker:{color:'#ff0066', size:10, line:{color:'#fff', width:1}}, hoverinfo:'none', visible:true }
+    ];
     
   console.log('DEBUG: About to call Plotly.react. Data:', data, 'Layout:', layout);
   console.log('Creating chart with', data[0].x.length, 'data points');
@@ -1342,7 +1689,10 @@ async function loadHistory(){
   const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
       
       await Plotly.newPlot('chart',
-        [{x:[], y:[], mode:'lines', name: PAIR}],
+        [
+          {x:[], y:[], mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'}},
+          {x:[], y:[], mode:'markers', name:'price', marker:{color:'#ff0066', size:10, line:{color:'#fff', width:1}}, hoverinfo:'none', visible:true }
+        ],
         { margin:{l:80,r:20,t:10,b:50},
           xaxis:{ 
             title: { text: 'Time', standoff: 25 },
@@ -1390,6 +1740,7 @@ async function updateChart() {
     if (!_chartReady) return;
     const chartEl = document.getElementById('chart');
     if (!chartEl || !chartEl.layout) return;
+  const scrollWrap = document.getElementById('chartScroll');
 
     const mode = localStorage.getItem('chartMode') || 'grid';
     const currentPrice = window.__currentPrice;
@@ -1458,60 +1809,255 @@ async function updateChart() {
         }
     }
 
-    // Finalize ticks and update layout
-    yTicksVals = [...new Set(yTicksVals)].sort((a, b) => a - b);
-    let yTicksText = yTicksVals.map(v => fmt(v, 6));
-    
-    // For active layers mode, make nearest layer ticks bold and black
-    if (mode === 'active') {
-        const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).sort((a, b) => a - b);
-        const { below, above } = nearestBracket(activeOrders, currentPrice);
-        
-        yTicksText = yTicksVals.map(v => {
-            const isNearest = (v === below || v === above);
-            if (isNearest) {
-                return `<b style="color: black">${fmt(v, 6)}</b>`;
-            }
-            return fmt(v, 6);
-        });
-    } else if (mode === 'grid') {
-        // For grid mode, show exact grid tick numbers with consistent formatting
-        const allLevels = buildAllLevels();
-        yTicksText = yTicksVals.map(v => {
-            // Just show the formatted value without [#] annotations
-            return fmt(v, 6);
-        });
+  // Add dynamic current price horizontal reference line (always on top)
+  if (isFinite(currentPrice)) {
+    const enabled = (localStorage.getItem('showPriceLine') !== '0');
+    if (enabled) {
+      // Distinct vivid color & slightly thicker for visibility
+      shapes.push(shapeForY(currentPrice, 'rgba(255, 0, 102, 0.9)', 2.5, 'solid'));
+      yTicksVals.push(currentPrice);
     }
+  }
 
-    // Add gray lines when price touches purple boundary lines (for all modes)
-    if (currentPrice != null && (GRID_MIN != null || GRID_MAX != null)) {
-        const tolerance = 0.000001; // Small tolerance for "touching"
-        
-        if (GRID_MIN != null && Math.abs(currentPrice - GRID_MIN) < tolerance) {
-            // Price is touching GRID_MIN, add three gray lines below
-            const spacing = (GRID_MAX - GRID_MIN) * 0.01; // 1% spacing
-            for (let i = 1; i <= 3; i++) {
-                const grayLineY = GRID_MIN - (spacing * i);
-                shapes.push(shapeForY(grayLineY, '#999999', 1, 'solid'));
-            }
-        }
-        
-        if (GRID_MAX != null && Math.abs(currentPrice - GRID_MAX) < tolerance) {
-            // Price is touching GRID_MAX, add three gray lines above
-            const spacing = (GRID_MAX - GRID_MIN) * 0.01; // 1% spacing
-            for (let i = 1; i <= 3; i++) {
-                const grayLineY = GRID_MAX + (spacing * i);
-                shapes.push(shapeForY(grayLineY, '#999999', 1, 'solid'));
-            }
-        }
+  // (Initial tick list built; finalization happens after boundary-touch augmentation below)
+  let yTicksText = [];
+
+  // Persistent tracking: once price touches a purple boundary, keep showing 4 gray latitude lines on that side
+    (function handleBoundaryTouch(){
+      if (GRID_MIN == null || GRID_MAX == null) return;
+      if (!window._boundaryTouch) {
+    window._boundaryTouch = { lastMin: GRID_MIN, lastMax: GRID_MAX, minTouched: false, maxTouched: false, lastPrice: null, minExtremePrice: null, maxExtremePrice: null };
+      }
+      const bt = window._boundaryTouch;
+      // Reset tracking if grid bounds changed
+      if (bt.lastMin !== GRID_MIN || bt.lastMax !== GRID_MAX) {
+        bt.lastMin = GRID_MIN;
+        bt.lastMax = GRID_MAX;
+        bt.minTouched = false;
+        bt.maxTouched = false;
+    bt.lastPrice = null;
+    bt.minExtremePrice = null;
+    bt.maxExtremePrice = null;
+      }
+      const span = (GRID_MAX - GRID_MIN) || 1;
+      const tolerance = Math.max(span * 1e-5, 1e-9); // slightly larger tolerance for practical touches
+      if (currentPrice != null) {
+    // Direct touch
+    if (!bt.minTouched && Math.abs(currentPrice - GRID_MIN) <= tolerance) bt.minTouched = true;
+    if (!bt.maxTouched && Math.abs(currentPrice - GRID_MAX) <= tolerance) bt.maxTouched = true;
+    // Crossing detection using last price
+    if (bt.lastPrice != null) {
+      if (!bt.minTouched && bt.lastPrice > GRID_MIN && currentPrice <= GRID_MIN + tolerance) bt.minTouched = true;
+      if (!bt.maxTouched && bt.lastPrice < GRID_MAX && currentPrice >= GRID_MAX - tolerance) bt.maxTouched = true;
     }
+    // Track extremes beyond boundaries for dynamic extension
+    if (currentPrice < GRID_MIN - tolerance) {
+      bt.minTouched = true;
+      if (bt.minExtremePrice == null || currentPrice < bt.minExtremePrice) bt.minExtremePrice = currentPrice;
+    }
+    if (currentPrice > GRID_MAX + tolerance) {
+      bt.maxTouched = true;
+      if (bt.maxExtremePrice == null || currentPrice > bt.maxExtremePrice) bt.maxExtremePrice = currentPrice;
+    }
+    bt.lastPrice = currentPrice;
+      }
+      const spacing = span * 0.01; // 1% spacing
+      const MIN_LINES = 4; // minimum lines once touched
+      // Determine dynamic counts based on extremes reached
+      let minCount = 0;
+      if (bt.minTouched) {
+        if (bt.minExtremePrice != null) {
+          const needed = Math.ceil((GRID_MIN - bt.minExtremePrice) / spacing);
+          minCount = Math.max(MIN_LINES, needed);
+        } else {
+          minCount = MIN_LINES;
+        }
+  // Follow-price mode: if price currently below GRID_MIN, always keep 4 extra layers below price
+  const _followMode = (window.followPriceEl && window.followPriceEl.checked);
+  if (_followMode && isFinite(currentPrice) && currentPrice < GRID_MIN) {
+          const extraNeeded = Math.ceil((GRID_MIN - currentPrice)/spacing) + 4; // distance to price + 4 more
+          if (extraNeeded > minCount) minCount = extraNeeded;
+        }
+  const includeTick = (i)=> _followMode ? true : (i <= 2); // in follow mode show all ticks
+        for (let i = 1; i <= minCount; i++) {
+          const y = GRID_MIN - spacing * i;
+          const maxIdx = minCount;
+          const alpha = Math.max(0.15, 0.85 * (1 - (i-1)/(maxIdx)) );
+          shapes.push(shapeForY(y, `rgba(153,153,153,${alpha.toFixed(3)})`, 1, 'solid'));
+          if (includeTick(i)) yTicksVals.push(y);
+        }
+      }
+      let maxCount = 0;
+      if (bt.maxTouched) {
+        if (bt.maxExtremePrice != null) {
+          const needed = Math.ceil((bt.maxExtremePrice - GRID_MAX) / spacing);
+          maxCount = Math.max(MIN_LINES, needed);
+        } else {
+          maxCount = MIN_LINES;
+        }
+  // Follow-price mode: if price currently above GRID_MAX, always keep 4 extra layers above price
+  const _followModeTop = (window.followPriceEl && window.followPriceEl.checked);
+  if (_followModeTop && isFinite(currentPrice) && currentPrice > GRID_MAX) {
+          const extraNeededTop = Math.ceil((currentPrice - GRID_MAX)/spacing) + 4;
+          if (extraNeededTop > maxCount) maxCount = extraNeededTop;
+        }
+  const includeTickTop = (i)=> _followModeTop ? true : (i <= 2); // in follow mode show all ticks
+        for (let i = 1; i <= maxCount; i++) {
+          const y = GRID_MAX + spacing * i;
+          const maxIdx = maxCount;
+          const alpha = Math.max(0.15, 0.85 * (1 - (i-1)/(maxIdx)) );
+          shapes.push(shapeForY(y, `rgba(153,153,153,${alpha.toFixed(3)})`, 1, 'solid'));
+          if (includeTickTop(i)) yTicksVals.push(y);
+        }
+      }
+    })();
 
-    Plotly.relayout('chart', {
-        shapes: shapes,
-        'yaxis.tickmode': 'array',
-        'yaxis.tickvals': yTicksVals,
-        'yaxis.ticktext': yTicksText,
+  // Finalize ticks AFTER adding any gray boundary-extension lines
+  yTicksVals = [...new Set(yTicksVals)].sort((a, b) => a - b);
+  if (mode === 'active') {
+    const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).sort((a, b) => a - b);
+    const { below, above } = nearestBracket(activeOrders, currentPrice);
+    yTicksText = yTicksVals.map(v => {
+      const isNearest = (v === below || v === above);
+      const isPrice = (isFinite(currentPrice) && Math.abs(v - currentPrice) <= (currentPrice * 1e-9 + 1e-12));
+      if (isNearest) return `<b style="color: black">${fmt(v, 6)}</b>`;
+      if (isPrice) return `<b style="color:#ff0066">${fmt(v,6)}</b>`;
+      return fmt(v, 6);
     });
+  } else {
+    // grid or latitudes modes just show formatted numbers
+    yTicksText = yTicksVals.map(v => {
+      const isPrice = (isFinite(currentPrice) && Math.abs(v - currentPrice) <= (currentPrice * 1e-9 + 1e-12));
+      if (isPrice) return `<b style="color:#ff0066">${fmt(v,6)}</b>`;
+      return fmt(v, 6);
+    });
+  }
+
+  let yRange = undefined;
+  const followPrice = (window.followPriceEl && window.followPriceEl.checked);
+  const autoZoom = (autoZoomEl && autoZoomEl.checked);
+  if (followPrice && isFinite(currentPrice)) {
+    try {
+      let span = null;
+      if (GRID_MIN != null && GRID_MAX != null && GRID_MAX > GRID_MIN) {
+        span = (GRID_MAX - GRID_MIN) * 0.4;
+      } else {
+        const trace = chartEl.data && chartEl.data[0];
+        if (trace && trace.y && trace.y.length > 30) {
+          const recent = trace.y.slice(-300).filter(v=>isFinite(v));
+          if (recent.length) {
+            const ymin = Math.min(...recent);
+            const ymax = Math.max(...recent);
+            const spanRecent = ymax - ymin;
+            if (spanRecent > 0) span = spanRecent * 0.8;
+          }
+        }
+      }
+      if (!span || span <= 0) span = currentPrice * 0.01;
+      const half = span/2;
+      yRange = [currentPrice - half, currentPrice + half];
+    } catch(e){ console.warn('followPrice calc failed', e); }
+  } else if (autoZoom) {
+    try {
+      const gd = chartEl;
+      const trace = gd.data && gd.data[0];
+      if (trace && trace.y && trace.y.length) {
+        const ys = trace.y.filter(v=>isFinite(v));
+        if (ys.length) {
+          const ymin = Math.min(...ys);
+          const ymax = Math.max(...ys);
+          if (ymax > ymin) {
+            const span = ymax - ymin;
+            const pad = span * 0.05; // 5% padding for auto range
+            yRange = [ymin - pad, ymax + pad];
+          }
+        }
+      }
+    } catch(e){ console.warn('autoZoom calc failed', e); }
+  }
+  if (!yRange && GRID_MIN != null && GRID_MAX != null) {
+    const span = GRID_MAX - GRID_MIN;
+    const pad = span * 0.03; // fallback padding
+    let low = GRID_MIN - pad;
+    let high = GRID_MAX + pad;
+    if (yTicksVals.length) {
+      // Ensure gray extension lines are visible
+      low = Math.min(low, yTicksVals[0]);
+      high = Math.max(high, yTicksVals[yTicksVals.length - 1]);
+    }
+    yRange = [low, high];
+  }
+
+  // Auto-zoom latitude override: when autoZoom (and not followPrice) is active, replace ticks with dynamic bright gray latitudes
+  if (autoZoom && !followPrice && yRange) {
+    try {
+      const span = yRange[1] - yRange[2-1]; // yRange[1]-yRange[0]; keeping original style but correct expression below
+    } catch(_){/* noop */}
+    const span2 = yRange[1] - yRange[0];
+    if (span2 > 0) {
+      const LAT_COUNT = 10; // number of intervals (produces LAT_COUNT+1 lines)
+      const latVals = [];
+      for (let i=0;i<=LAT_COUNT;i++) {
+        const v = yRange[0] + (span2 * i / LAT_COUNT);
+        latVals.push(v);
+      }
+      // Build shapes for these dynamic latitudes (avoid duplicating existing shapes at boundaries by skipping if equals GRID_MIN/MAX)
+      for (const v of latVals) {
+        if (GRID_MIN != null && Math.abs(v-GRID_MIN) < 1e-12) continue;
+        if (GRID_MAX != null && Math.abs(v-GRID_MAX) < 1e-12) continue;
+        shapes.push(shapeForY(v, 'rgba(210,210,210,0.9)', 1, 'solid'));
+      }
+      // Ensure price tick retained/highlighted
+      if (isFinite(currentPrice) && !latVals.some(v=>Math.abs(v-currentPrice) <= (Math.abs(currentPrice)*1e-9 + 1e-12))) {
+        latVals.push(currentPrice);
+      }
+      latVals.sort((a,b)=>a-b);
+      yTicksVals = latVals;
+      yTicksText = latVals.map(v=>{
+        const isPrice = isFinite(currentPrice) && Math.abs(v-currentPrice) <= (Math.abs(currentPrice)*1e-9 + 1e-12);
+        return isPrice ? `<b style="color:#ff0066">${fmt(v,6)}</b>` : fmt(v,6);
+      });
+    }
+  }
+  Plotly.relayout('chart', {
+    shapes: shapes,
+    'yaxis.tickmode': 'array',
+    'yaxis.tickvals': yTicksVals,
+    'yaxis.ticktext': yTicksText,
+    'yaxis.range': yRange,
+  });
+
+  // Removed right-edge price annotation (was previously price-edge-dot)
+
+  // Adaptive height: if many extended lines, increase inner chart height to enable scroll
+  if (scrollWrap) {
+    try {
+      const baseHeight = 520; // px
+      // Count gray extension lines (approx difference beyond boundaries)
+      let extraLines = 0;
+      if (window._boundaryTouch) {
+        const bt = window._boundaryTouch;
+        if (bt.minExtremePrice != null && GRID_MIN != null) {
+          const span = (GRID_MAX - GRID_MIN) || 1;
+          const spacing = span * 0.01;
+          extraLines += Math.max(0, Math.ceil((GRID_MIN - bt.minExtremePrice)/spacing));
+        }
+        if (bt.maxExtremePrice != null && GRID_MAX != null) {
+          const span = (GRID_MAX - GRID_MIN) || 1;
+          const spacing = span * 0.01;
+          extraLines += Math.max(0, Math.ceil((bt.maxExtremePrice - GRID_MAX)/spacing));
+        }
+      }
+      const added = Math.min(2000, extraLines * 8); // 8px per extra line (capped)
+      const newHeight = baseHeight + added;
+      const chartDiv = document.getElementById('chart');
+      if (chartDiv && chartDiv.style.height !== newHeight + 'px') {
+        chartDiv.style.height = newHeight + 'px';
+        // Force Plotly to resize
+        Plotly.Plots.resize(chartDiv);
+      }
+    } catch(e){ console.warn('adaptive height failed', e); }
+  }
 }
 
 // Handles switching between chart modes
@@ -1525,24 +2071,59 @@ function setChartMode(mode) {
 
 // This function will be called during initialization to set up event listeners
 function setupChartControls() {
-    showGridEl.addEventListener('change', () => { if(showGridEl.checked) setChartMode('grid'); });
-    showActiveEl.addEventListener('change', () => { if(showActiveEl.checked) setChartMode('active'); });
-    showLatEl.addEventListener('change', () => { if(showLatEl.checked) setChartMode('latitudes'); });
+  showGridEl.addEventListener('change', () => { if(showGridEl.checked) setChartMode('grid'); });
+  showActiveEl.addEventListener('change', () => { if(showActiveEl.checked) setChartMode('active'); });
+  showLatEl.addEventListener('change', () => { if(showLatEl.checked) setChartMode('latitudes'); });
+  if (showPriceLineEl){
+    showPriceLineEl.checked = (localStorage.getItem('showPriceLine') !== '0');
+    showPriceLineEl.addEventListener('change', () => {
+      localStorage.setItem('showPriceLine', showPriceLineEl.checked ? '1':'0');
+      updateChart();
+    });
+  }
+  // Price marker toggle removed (always visible now)
+  // Follow price toggle
+  if (window.followPriceEl){
+    window.followPriceEl.checked = (localStorage.getItem('followPrice') === '1');
+    window.followPriceEl.addEventListener('change', ()=>{
+      localStorage.setItem('followPrice', window.followPriceEl.checked ? '1':'0');
+      if (window.followPriceEl.checked && autoZoomEl){
+        autoZoomEl.checked = false;
+        localStorage.setItem('chartAutoZoom','0');
+      }
+      updateChart();
+    });
+  }
+  if (autoZoomEl) {
+    autoZoomEl.checked = localStorage.getItem('chartAutoZoom') === '1';
+    autoZoomEl.addEventListener('change', () => {
+      localStorage.setItem('chartAutoZoom', autoZoomEl.checked ? '1':'0');
+      if (autoZoomEl.checked && window.followPriceEl){
+        window.followPriceEl.checked = false;
+        localStorage.setItem('followPrice','0');
+      }
+      updateChart();
+    });
+  }
+  const savedMode = localStorage.getItem('chartMode') || 'grid';
+  setChartMode(savedMode);
 
-    // Restore saved mode on page load
-    const savedMode = localStorage.getItem('chartMode') || 'grid';
-    setChartMode(savedMode);
+  // Legend toggle (DOGE/USDT) - toggles primary price trace visibility (trace 0)
+  // legend toggle removed; price curve always visible
 }
 
 /* ====== SSE ====== */
 window.__currentPrice = null;
+// Control element refs (populated in boot)
+// price marker always visible (legacy toggle removed)
+var followPriceEl = null;
 
 function startSSE(){
   try{
     const es = new EventSource('/stream');
 
     // live price ticks
-    es.addEventListener('tick', async ev=>{
+  es.addEventListener('tick', async ev=>{
       try{
         const j = JSON.parse(ev.data);
         
@@ -1562,11 +2143,22 @@ function startSSE(){
           return;
         }
 
-        // Update price display
+        // Update price display & source badge
         const priceEl = document.getElementById('priceVal');
         if (priceEl) {
           clearLoadingState('priceVal');
           priceEl.textContent = fmt(j.p, 6);
+        }
+        const srcEl = document.getElementById('priceSource');
+        if (srcEl){
+          const src = j.s;
+          if (src){
+            srcEl.textContent = src;
+            srcEl.className = 'src-badge ' + (src==='auth'?'local':src); // reuse styling; 'auth' not mapped so keep base style
+          } else {
+            srcEl.textContent='';
+            srcEl.className='src-badge hidden';
+          }
         }
         
         const t = new Date(j.t);
@@ -1591,7 +2183,10 @@ function startSSE(){
             const yTicksText = levels.map(v => Number(v).toFixed(6).replace(/^\./, '0.'));
             
             await Plotly.newPlot('chart',
-              [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
+              [
+                { x:[t], y:[j.p], mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'} },
+                { x:[t], y:[j.p], mode:'markers', name:'price', marker:{color:'#ff0066', size:10, line:{color:'#fff', width:1}}, hoverinfo:'none', visible:true }
+              ],
               { margin:{l:80,r:20,t:10,b:50},
                 xaxis:{ 
                   title: { text: 'Time', standoff: 25 },
@@ -1624,6 +2219,10 @@ function startSSE(){
           // Try to extend existing chart
           try {
             Plotly.extendTraces('chart', {x:[[t]], y:[[j.p]]}, [0], 10000);
+            try {
+              const markerVisible = true;
+              Plotly.restyle('chart', {x:[[t]], y:[[j.p]], visible: markerVisible, 'marker.size':10}, [1]);
+            } catch(markerErr) { console.warn('marker restyle failed', markerErr); }
           } catch (extendError) {
             console.warn('Failed to extend traces, recreating chart:', extendError);
             
@@ -1634,7 +2233,10 @@ function startSSE(){
               const yTicksText = levels.map(v => fmt(v, 6));
               
               await Plotly.newPlot('chart',
-                [{ x:[t], y:[j.p], mode:'lines', name: PAIR }],
+                [
+                  { x:[t], y:[j.p], mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'} },
+                  { x:[t], y:[j.p], mode:'markers', name:'price', marker:{color:'#ff0066', size:10, line:{color:'#fff', width:1}}, hoverinfo:'none', visible:true }
+                ],
                 { margin:{l:80,r:20,t:10,b:50},
                   xaxis:{ 
                     title: { text: 'Time', standoff: 25 },
@@ -1679,7 +2281,7 @@ function startSSE(){
     es.addEventListener('stats', ev=>{
       try{
         const s = JSON.parse(ev.data);
-        // עדכון כרטיסי רווח
+  // Update profit cards
         setText('profitVal', s.profit_usd, 2);
         setText('sellTradesVal', s.sell_trades_count, 0);
         setText('actualSplitsVal', s.actual_splits_count, 0);
@@ -1787,27 +2389,47 @@ function renderOpenOrders(){
 
 async function loadOpenOrders(){
   const note = document.getElementById('openNote');
+  const badge = document.getElementById('openSourceBadge');
   try{
     const r = await fetch('/api/open_orders');
     const j = await r.json();
     if(j.ok && Array.isArray(j.orders)){
       OPEN_ORDERS_RAW = j.orders;
       note.textContent = j.orders.length? '' : 'No open orders.';
+      if (badge){
+        if (j.source){
+          badge.textContent = j.source;
+          badge.className = 'src-badge ' + j.source;
+        } else {
+          badge.textContent = '';
+          badge.className = 'src-badge hidden';
+        }
+      }
       renderOpenOrders();
     }else{
       note.textContent = j.error || 'Auth required (API key/secret).';
       OPEN_ORDERS_RAW = [];
+      if (badge){
+        if (j.source){
+          badge.textContent = j.source;
+          badge.className = 'src-badge error';
+        } else {
+          badge.textContent='';
+          badge.className = 'src-badge hidden';
+        }
+      }
       renderOpenOrders();
     }
   }catch(e){
     note.textContent = 'Failed to load.';
     OPEN_ORDERS_RAW = [];
+    if (badge){ badge.textContent=''; badge.className='src-badge hidden'; }
     renderOpenOrders();
   }
   updateLastUpdated();
 }
 
-function renderHistOrders(){
+function renderHistOrders(meta){
   const tb = document.querySelector('#histTbl tbody'); tb.innerHTML='';
   const sortKey = document.getElementById('histSortBy').value;
   const sortDir = document.getElementById('histSortDir').value;
@@ -1816,7 +2438,14 @@ function renderHistOrders(){
   let rows = textFilter(HIST_ORDERS_RAW, q);
   rows = sortBy(rows, sortKey, sortDir);
 
-  document.getElementById('histCount').textContent = `(${rows.length})`;
+  const cntEl = document.getElementById('histCount');
+  if (cntEl){
+    if (meta && typeof meta.total==='number'){
+      cntEl.textContent = `(${rows.length}/${meta.total})`;
+    } else {
+      cntEl.textContent = `(${rows.length})`;
+    }
+  }
 
   for(const o of rows){
     const tr = document.createElement('tr');
@@ -1832,23 +2461,88 @@ function renderHistOrders(){
   }
 }
 
+let _histFirstLoad = true;
+let _histNextEndTime = null; // track oldest timestamp fetched for backward pagination
 async function loadHistoryOrders(){
   const note = document.getElementById('histNote');
+  const badge = document.getElementById('histSourceBadge');
   try{
-    const r = await fetch('/api/order_history');
+  let url = '/api/order_history';
+  if (_histFirstLoad){ url += '?full=1'; }
+  else if(_histNextEndTime){
+    const sep = url.includes('?') ? '&' : '?';
+    url += sep + 'endTime=' + encodeURIComponent(_histNextEndTime);
+  }
+  const r = await fetch(url);
     const j = await r.json();
     if(j.ok && Array.isArray(j.orders)){
-      HIST_ORDERS_RAW = j.orders;
+      if(Array.isArray(HIST_ORDERS_RAW) && HIST_ORDERS_RAW.length){
+        const existingKeys = new Set(HIST_ORDERS_RAW.map(r=>[r.id,r.time,r.side,Number(r.price).toFixed(8),Number(r.amount).toFixed(8),r.status].join('|')));
+        for(const r of j.orders){
+          const k = [r.id,r.time,r.side,Number(r.price).toFixed(8),Number(r.amount).toFixed(8),r.status].join('|');
+          if(!existingKeys.has(k)){
+            existingKeys.add(k);
+            HIST_ORDERS_RAW.push(r);
+          }
+        }
+      } else {
+        HIST_ORDERS_RAW = j.orders.slice();
+      }
+      // Cap client-side accumulation to 5000
+      if (HIST_ORDERS_RAW.length > 5000){
+        HIST_ORDERS_RAW = HIST_ORDERS_RAW.slice(-5000);
+      }
       note.textContent = j.orders.length? '' : 'No history to show.';
-      renderHistOrders();
+      if (badge){
+        if (j.source){
+          badge.textContent = j.source;
+          badge.className = 'src-badge ' + j.source;
+        } else {
+          badge.textContent='';
+          badge.className = 'src-badge hidden';
+        }
+      }
+      renderHistOrders({total: j.total});
+      // If first load and still thin (<40) attempt enrichment
+      if(_histFirstLoad && HIST_ORDERS_RAW.length < 40){
+        try {
+          const r2 = await fetch('/api/order_history?full=1&include=trades,state');
+          const j2 = await r2.json();
+          if (j2.ok && Array.isArray(j2.orders)){
+            const existingKeys2 = new Set(HIST_ORDERS_RAW.map(r=>[r.id,r.time,r.side,Number(r.price).toFixed(8),Number(r.amount).toFixed(8),r.status].join('|')));
+            for(const r of j2.orders){
+              const k = [r.id,r.time,r.side,Number(r.price).toFixed(8),Number(r.amount).toFixed(8),r.status].join('|');
+              if(!existingKeys2.has(k)){
+                existingKeys2.add(k);
+                HIST_ORDERS_RAW.push(r);
+              }
+            }
+            if (HIST_ORDERS_RAW.length > 5000){
+              HIST_ORDERS_RAW = HIST_ORDERS_RAW.slice(-5000);
+            }
+            renderHistOrders({total: j2.total});
+          }
+        }catch(_e){}
+      }
+      _histFirstLoad = false;
     }else{
       note.textContent = j.error || 'Auth required (API key/secret).';
       HIST_ORDERS_RAW = [];
+      if (badge){
+        if (j.source){
+          badge.textContent = j.source;
+          badge.className = 'src-badge error';
+        } else {
+          badge.textContent='';
+          badge.className = 'src-badge hidden';
+        }
+      }
       renderHistOrders();
     }
   }catch(e){
     note.textContent = 'Failed to load.';
     HIST_ORDERS_RAW = [];
+    if (badge){ badge.textContent=''; badge.className='src-badge hidden'; }
     renderHistOrders();
   }
   updateLastUpdated();
@@ -1883,13 +2577,13 @@ function wireControls(){
   if(refreshBtn) refreshBtn.addEventListener('click', ()=>{
     loadStats(); loadOpenOrders(); loadHistoryOrders(); loadHistory(); updateLastUpdated();
   });
-  const stopBtn = document.getElementById('btnStop');
-  if(stopBtn) stopBtn.addEventListener('click', ()=>{ fetch('/api/stop_bot', {method:'POST'}); });
-  const resumeBtn = document.getElementById('btnResume');
-  if(resumeBtn) resumeBtn.addEventListener('click', ()=>{ fetch('/api/resume_bot', {method:'POST'}); });
-  const cancelBtn = document.getElementById('btnCancel');
-  if(cancelBtn) cancelBtn.addEventListener('click', ()=>{ fetch('/api/cancel_all_orders', {method:'POST'}); });
-
+  const olderBtn = document.getElementById('btnHistOlder');
+  if(olderBtn) olderBtn.addEventListener('click', ()=>{ fetchOlderHistory(); });
+  const applyIntBtn = document.getElementById('btnApplyInterval');
+  if(applyIntBtn) applyIntBtn.addEventListener('click', ()=>{ applyAutoRefreshInterval(); });
+  const exportBtn = document.getElementById('btnExportCSV');
+  if(exportBtn) exportBtn.addEventListener('click', exportHistoryCSV);
+  
   // Persist collapsible states for dashboard components
   function persistCollapsibleState(){
     ['chartBox', 'openBox', 'histBox'].forEach(id => {
@@ -1920,10 +2614,53 @@ function wireControls(){
   renderHistOrders();
 }
 
+// Export history respecting current filter & sort
+function exportHistoryCSV(){
+  if(!HIST_ORDERS_RAW || !HIST_ORDERS_RAW.length){ return; }
+  const sortKeyEl = document.getElementById('histSortBy');
+  const sortDirEl = document.getElementById('histSortDir');
+  const filterEl = document.getElementById('histFilter');
+  const sortKey = sortKeyEl ? sortKeyEl.value : 'time';
+  const sortDir = sortDirEl ? sortDirEl.value : 'desc';
+  const filterTxt = filterEl ? filterEl.value.trim() : '';
+  let rows = HIST_ORDERS_RAW;
+  rows = textFilter(rows, filterTxt);
+  rows = sortBy(rows, sortKey, sortDir);
+  if(!rows.length) return;
+  const headers = ['id','time','execution_time','side','status','price','amount','value_usdt'];
+  const lines = [headers.join(',')];
+  for(const r of rows){
+    const row = headers.map(h=>{
+      let v = r[h];
+      if(v===undefined || v===null) v='';
+      if(typeof v === 'string'){
+        if(v.includes(',') || v.includes('"') || v.includes('\n')){
+          v = '"'+v.replace(/"/g,'""')+'"';
+        }
+      }
+      return v;
+    }).join(',');
+    lines.push(row);
+  }
+  const blob = new Blob([lines.join('\n')], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const ts = new Date().toISOString().replace(/[:T]/g,'-').slice(0,19);
+  a.download = 'order_history_filtered_'+ts+'.csv';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+
 async function boot(){
   showGridEl = document.getElementById('showGrid');
   showActiveEl = document.getElementById('showActiveLayers');
   showLatEl = document.getElementById('showLat');
+  showPriceLineEl = document.getElementById('showPriceLine');
+  // price marker always visible (legacy toggle removed)
+  followPriceEl = document.getElementById('followPrice');
+  autoZoomEl = document.getElementById('autoZoom');
   wireControls();
   
   // Initialize loading states for cards that start with dashes
@@ -1931,18 +2668,48 @@ async function boot(){
   
   await loadStats();
   await loadInitialInvestments();
-  await loadHistory();    // טוען היסטוריה לפני הזרם
-  startSSE();             // ואז סטרים חי למחיר + סטטיסטיקות
+  await loadHistory();    // load history before starting stream
+  startSSE();             // then live stream for price + statistics
   await loadOpenOrders();
   await loadHistoryOrders();
-  // רענונים תקופתיים (fallback)
-  setInterval(loadStats, 15000);
-  setInterval(loadInitialInvestments, 30000); // Refresh initial investments every 30s
-  setInterval(loadOpenOrders, 20000);
-  setInterval(loadHistoryOrders, 25000);
+  // Periodic refresh via dynamic interval
+  try{
+    const saved = localStorage.getItem('ui.autoRefreshMs');
+    if(saved){ const v = parseInt(saved,10); if(!isNaN(v)) document.getElementById('autoRefreshMs').value = v; }
+  }catch(_){ }
+  applyAutoRefreshInterval();
+  refreshAuthStatus();
 }
 
 document.addEventListener('DOMContentLoaded', boot);
+
+async function refreshAuthStatus(){
+  try{
+    const r = await fetch('/api/auth_status');
+    const j = await r.json();
+    const el = document.getElementById('authStatus');
+    if(!el) return;
+    if(!j.has_keys){
+      el.textContent = 'NO KEYS';
+      el.className = 'src-badge auth-missing';
+      return;
+    }
+    if(j.last_error){
+      el.textContent = 'AUTH ERR';
+      el.title = j.last_error;
+      el.className = 'src-badge auth-error';
+    } else {
+      el.textContent = 'AUTH OK';
+      el.className = 'src-badge auth-ok';
+    }
+  }catch(e){
+    const el = document.getElementById('authStatus');
+    if(el){
+      el.textContent = 'AUTH ?';
+      el.className = 'src-badge auth-error';
+    }
+  }
+}
 </script>
 
 </body>

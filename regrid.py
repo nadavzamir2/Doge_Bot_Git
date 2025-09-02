@@ -12,6 +12,7 @@ import os, sys, math, argparse, time
 from dataclasses import dataclass
 from typing import List, Tuple
 from dotenv import load_dotenv
+from config import DISABLE_REGRID
 
 # --------------------
 # Load env
@@ -187,6 +188,10 @@ def main():
     ap.add_argument("--cancel-only", action="store_true", help="Only cancel existing open orders.")
     ap.add_argument("--apply", action="store_true", help="Place new grid orders (LIVE). Omit for dry preview.")
     args = ap.parse_args()
+
+    if DISABLE_REGRID:
+        print("[INFO] Regrid functionality is disabled (DISABLE_REGRID=1). Exiting.")
+        return
 
     ex = make_client()
 

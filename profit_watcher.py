@@ -4,17 +4,19 @@
 """
 profit_watcher.py
 -----------------
-Sidecar שמחשב רווח ממומש (FIFO) מטריידים בבינאנס ומעדכן ~/doge_bot/data/runtime_stats.json.
-שומר מצב ב- ~/doge_bot/data/profit_watcher_state.json כדי לא לספור פעמיים.
+Sidecar computing realized profit (FIFO) from Binance trades and updating
+~/doge_bot/data/runtime_stats.json. Persists state in
+~/doge_bot/data/profit_watcher_state.json to avoid double counting.
 
-- backfill היסטורי (אופציונלי)
-- לופ "חי" שממשיך למשוך טריידים חדשים
-- מחשוב רווח ממומש (כולל עמלות לשני הצדדים)
-- עדכון dashboard דרך utils_stats.add_realized_profit
-- עדכון מנגנון החלוקה (BNB/רה-אינבסט) דרך profit_split.handle_profit
-- **NEW**: סנכרון bnb_converted_usd ב-dashboard לפי profit_split.state.json
+Features:
+- Optional historical backfill
+- Live loop fetching new trades
+- Realized profit computation (including fees on both sides)
+- Dashboard update via utils_stats.add_realized_profit
+- Profit split mechanism update (BNB / reinvest) via profit_split.handle_profit
+- NEW: Synchronize bnb_converted_usd on dashboard from profit_split.state.json
 
-הרצה לדוגמה:
+Example run:
     cd ~/doge_bot
     source venv/bin/activate
     python3 -u profit_watcher.py --backfill --since-days 7
@@ -33,15 +35,15 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from dotenv import load_dotenv
 
-# === טעינת ENV מהפרויקט ===
+# === Load project ENV ===
 ENV_FILE = os.path.expanduser("~/doge_bot/.env")
 load_dotenv(ENV_FILE)
 
 import ccxt  # noqa: E402
 from utils_stats import add_realized_profit  # noqa: E402
-from profit_split import handle_profit, read_state as split_read_state  # ← נשתמש גם לקריאת total_sent_to_bnb_usd
+from profit_split import handle_profit, read_state as split_read_state  # also used for reading total_sent_to_bnb_usd
 
-# === קונפיג כללי ===
+# === General configuration ===
 BINANCE_REGION = os.getenv("BINANCE_REGION", "com").strip().lower()
 API_KEY = os.getenv("BINANCE_TRADE_KEY") or os.getenv("BINANCE_API_KEY") or ""
 API_SECRET = os.getenv("BINANCE_TRADE_SECRET") or os.getenv("BINANCE_API_SECRET") or ""
@@ -53,7 +55,7 @@ DATA_DIR = pathlib.Path.home() / "doge_bot" / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "profit_watcher_state.json"
 
-# === נתיב קובץ הסטטוס שהדשבורד קורא ===
+# === Path of status file read by the dashboard ===
 STATS_FILE = DATA_DIR / "runtime_stats.json"
 _STATS_LOCK = threading.Lock()
 
@@ -64,7 +66,7 @@ def _load_stats() -> Dict[str, Any]:
             return json.loads(STATS_FILE.read_text(encoding="utf-8"))
     except Exception:
         pass
-    # מבנה ברירת מחדל שתואם ל-/api/stats בדאשבורד
+    # Default structure matching /api/stats in the dashboard
     return {
         "cumulative_profit_usd": 0.0,
         "splits_count": 0,
@@ -73,7 +75,7 @@ def _load_stats() -> Dict[str, Any]:
 
 
 def _set_bnb_converted_usd(abs_total_usd: float) -> None:
-    """מעדכן את השדה bnb_converted_usd בקובץ הסטטוס לערך מוחלט (לא הוספה דלתאית)."""
+    """Update bnb_converted_usd field in status file to an absolute value (not delta)."""
     with _STATS_LOCK:
         st = _load_stats()
         st["bnb_converted_usd"] = float(abs_total_usd)
@@ -81,7 +83,7 @@ def _set_bnb_converted_usd(abs_total_usd: float) -> None:
 
 
 def make_client():
-    """יוצר מחבר CCXT בהתאם לאזור (com/us) עם קצב מוגבל ו-sync זמן."""
+    """Create CCXT client for region (com/us) with rate limit & time sync."""
     Cls = ccxt.binanceus if BINANCE_REGION == "us" else ccxt.binance
     kwargs = {
         "enableRateLimit": True,
@@ -102,11 +104,11 @@ def make_client():
     return ex
 
 
-# מחבר גלובלי לשימוש בכל הפונקציות
+# Global client used across functions
 ex = make_client()
 
 
-# === ניהול מצב ל-FIFO ===
+# === FIFO state management ===
 def _init_state() -> Dict[str, Any]:
     return {"last_trade_id": None, "inventory": []}
 
@@ -132,7 +134,7 @@ def write_state(s: Dict[str, Any]) -> None:
     tmp.replace(STATE_FILE)
 
 
-# === חישוב רווח ממומש (כולל עמלות לשני הצדדים) ===
+# === Realized profit computation (including fees on both sides) ===
 def realized_profit_on_match(buy_price: float, sell_price: float, qty: float,
                              fee_rate_each_side: float) -> float:
     gross = (sell_price - buy_price) * qty
@@ -143,9 +145,9 @@ def realized_profit_on_match(buy_price: float, sell_price: float, qty: float,
 def fifo_match_sell(inventory: List[Dict[str, float]], sell_price: float, qty: float,
                     fee_rate_each_side: float) -> Tuple[float, float]:
     """
-    משדך SELL מול מלאי קיים (FIFO). מחזיר:
+    Match a SELL against existing inventory (FIFO). Returns:
     - realized (USD)
-    - matched qty (כמה כמות נמכרה בפועל ממלאי)
+    - matched qty (actual quantity sold from inventory)
     """
     remaining = qty
     realized = 0.0
@@ -161,7 +163,7 @@ def fifo_match_sell(inventory: List[Dict[str, float]], sell_price: float, qty: f
     return realized, matched
 
 
-# === שליפת טריידים מהבורסה (with normalize/sort) ===
+# === Fetch trades from exchange (normalize/sort) ===
 def normalize_trades(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     def key(t):
         return (int(t.get("timestamp") or 0), str(t.get("id") or ""))
@@ -185,7 +187,7 @@ def fetch_trades_window(pair: str, since_ms: Optional[int] = None, limit: int = 
         return []
 
 
-# === עיבוד רצף טריידים לחישוב רווח ממומש ו"ספליטים" ===
+# === Process trade sequence to compute realized profit and "splits" ===
 def process_trades_sequence(trades: List[Dict[str, Any]], st: Dict[str, Any],
                             fee_rate_each_side: float) -> Tuple[float, int, Optional[str]]:
     inv = st.get("inventory", [])
@@ -216,10 +218,10 @@ def process_trades_sequence(trades: List[Dict[str, Any]], st: Dict[str, Any],
     return realized_total, inc_sell_trades, last_id
 
 
-# === עזר: סנכרון מוחלט של bnb_converted_usd מה-profit_split ===
+# === Helper: absolute sync of bnb_converted_usd from profit_split ===
 def _sync_bnb_converted_from_split_state():
     try:
-        split_state = split_read_state()  # קורא state.json של profit_split
+        split_state = split_read_state()  # reads profit_split state.json
         total_to_bnb = float(split_state.get("total_sent_to_bnb_usd", 0.0) or 0.0)
         _set_bnb_converted_usd(total_to_bnb)
         print(f"[SYNC] dashboard.bnb_converted_usd := {total_to_bnb:.2f}")
@@ -227,7 +229,7 @@ def _sync_bnb_converted_from_split_state():
         print(f"[SYNC][WARN] failed syncing bnb_converted_usd: {e}")
 
 
-# === שלב backfill (אופציונלי) ===
+# === Backfill phase (optional) ===
 def do_backfill(st: Dict[str, Any], since_ms: int) -> Dict[str, Any]:
     print(f"[BACKFILL] starting backfill from since_ms={since_ms}")
     trades = fetch_trades_window(PAIR, since_ms=since_ms, limit=1000)
@@ -238,18 +240,18 @@ def do_backfill(st: Dict[str, Any], since_ms: int) -> Dict[str, Any]:
     realized, sell_trades, last_id = process_trades_sequence(trades, st, FEE_RATE_EACH_SIDE)
     print(f"[BACKFILL] processed {len(trades)} trades | realized={realized:.6f} | sell_trades={sell_trades}")
 
-    # === עדכוני סטטוס + חלוקה ===
+    # === Status + profit-split updates ===
     if abs(realized) > 1e-12 or sell_trades > 0:
-        # עדכון dashboard (מצטבר/ספירה)
+    # Update dashboard (cumulative / count)
         add_realized_profit(realized, inc_sell_trades=sell_trades)
-        # עדכון מנגנון חלוקה (state.json + קניית BNB אם צריך)
+    # Update profit split mechanism (state.json + BNB purchase if needed)
         if realized > 0:
             try:
                 handle_profit(realized, ex)
                 print(f"[SPLIT] handle_profit(realized={realized:.6f}) done (backfill).")
             except Exception as e:
                 print(f"[SPLIT][WARN] handle_profit failed (backfill): {e}")
-            # תמיד נסנכרן את המצב המצטבר לדשבורד (גם אם לא בוצעה קנייה בפועל)
+            # Always sync accumulated BNB conversion to dashboard (even if no purchase executed)
             _sync_bnb_converted_from_split_state()
 
     st["last_trade_id"] = last_id
@@ -257,9 +259,9 @@ def do_backfill(st: Dict[str, Any], since_ms: int) -> Dict[str, Any]:
     return st
 
 
-# === לופ חי (polling) ===
+# === Live loop (polling) ===
 def live_tail_loop(st: Dict[str, Any], interval_sec: int):
-    # Bootstrap של last_trade_id (אם אין)
+    # Bootstrap last_trade_id if missing
     if st.get("last_trade_id") is None:
         recent = fetch_trades_window(PAIR, since_ms=None, limit=1)
         if recent:
@@ -292,18 +294,18 @@ def live_tail_loop(st: Dict[str, Any], interval_sec: int):
             realized, sell_trades, new_last_id = process_trades_sequence(new_trades, st, FEE_RATE_EACH_SIDE)
             print(f"[LIVE] processed {len(new_trades)} new trades | realized={realized:.6f} | sell_trades={sell_trades}")
 
-            # === עדכוני סטטוס + חלוקה ===
+            # === Status + profit-split updates ===
             if abs(realized) > 1e-12 or sell_trades > 0:
-                # עדכון dashboard (מצטבר/ספירה)
+                # Update dashboard (cumulative / count)
                 add_realized_profit(realized, inc_sell_trades=sell_trades)
-                # עדכון מנגנון חלוקה (state.json + קניית BNB אם צריך)
+                # Update profit split mechanism (state.json + buy BNB if needed)
                 if realized > 0:
                     try:
                         handle_profit(realized, ex)
                         print(f"[SPLIT] handle_profit(realized={realized:.6f}) done (live).")
                     except Exception as e:
                         print(f"[SPLIT][WARN] handle_profit failed (live): {e}")
-                # בכל מקרה נסנכרן את הסכום המצטבר שהועבר ל-BNB לדשבורד
+                # Always sync cumulative amount converted to BNB to dashboard
                 _sync_bnb_converted_from_split_state()
 
             st["last_trade_id"] = new_last_id or last_id

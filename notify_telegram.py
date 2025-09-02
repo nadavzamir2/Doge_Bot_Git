@@ -1,7 +1,7 @@
 # notifier.py
 import os, time
 
-# ננסה להשתמש ב-requests; אם אין, נבטל טלגרם ונזהיר פעם אחת
+# Try to use requests; if unavailable, disable Telegram and warn once
 _requests_ok = True
 try:
     import requests
@@ -17,7 +17,7 @@ _last_warn_no_tg = 0.0
 def _send_telegram(text: str):
     global _last_warn_no_tg
     if not _TG_ENABLED:
-        # נזהיר פעם ב-60 שניות בלבד כדי לא להציף
+        # Warn at most once every 60 seconds to avoid flooding
         now = time.time()
         if now - _last_warn_no_tg > 60:
             if not _requests_ok:
@@ -50,6 +50,6 @@ def err(msg: str):
     print("[ERROR]", msg)
 
 def alert(msg: str):
-    """שליחת הודעת טלגרם + הדפסה למסך."""
+    """Send a Telegram message (if enabled) and print to console."""
     print("[ALERT]", msg)
     _send_telegram(msg)

@@ -5,17 +5,17 @@ import os, sys, time, json, math, signal, logging
 from typing import Dict, Any, Optional
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 
-# צד שלישי
+# Third-party
 import ccxt
 from dotenv import load_dotenv
 
-# מודולים אופציונליים שכבר קיימים אצלך בפרויקט
+# Optional modules that may already exist in your project
 try:
-    import profit_split   # מודול קיים אצלך: פיצול רווח -> BNB + reinvest
+    import profit_split   # Module in project: profit split -> BNB + reinvest
 except Exception:
     profit_split = None
 
-# ---------- קונפיג לוגים ----------
+# ---------- Logging Config ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("doge_grid_bot")
 
-# ---------- ENV / פרמטרים ----------
+# ---------- ENV / Parameters ----------
 ENV_PATH = os.path.expanduser("~/doge_bot/.env")
 if os.path.exists(ENV_PATH):
     load_dotenv(ENV_PATH)
@@ -34,23 +34,23 @@ MODE = os.getenv("MODE", "LIVE").upper()   # LIVE / PAPER
 REGION = os.getenv("BINANCE_REGION", "com").lower()  # com / us
 RECVWINDOW = int(os.getenv("BINANCE_RECVWINDOW", "10000"))
 
-# מפתחות – תומך בפיצול מפתחות (TRADE/READ) או בזוג הישן
+# API keys – supports split keys (TRADE/READ) or legacy pair
 API_KEY  = os.getenv("BINANCE_TRADE_KEY")   or os.getenv("BINANCE_API_KEY")
 API_SEC  = os.getenv("BINANCE_TRADE_SECRET") or os.getenv("BINANCE_API_SECRET")
 
 PAIR = os.getenv("PAIR", "DOGE/USDT")
 
-# פרמטרי הגריד ברירת־מחדל (כפי שהוגדרו מולך)
+# Default grid parameters
 GRID_LOW  = Decimal(os.getenv("GRID_LOW",  "0.13"))
 GRID_HIGH = Decimal(os.getenv("GRID_HIGH", "0.32"))
-STEP_PCT  = Decimal(os.getenv("STEP_PCT",  "1.0"))  # אחוז בין שכבות
+STEP_PCT  = Decimal(os.getenv("STEP_PCT",  "1.0"))  # percent between layers
 
-# גודל הזמנה בסיסי בדולר + תקרת מחזור לחפיסה
+# Base order size in USD + cycle cap
 BASE_ORDER_USD = Decimal(os.getenv("BASE_ORDER_USD", "5.0"))
 MAX_CYCLE_USD  = Decimal(os.getenv("MAX_CYCLE_USD", "40.0"))
 
-# באפר עמלות כדי לא להיתקע על “MIN_NOTIONAL”
-FEE_BUFFER = Decimal(os.getenv("FEE_BUFFER", "0.001"))  # 0.1% כברירת מחדל
+# Fee buffer to avoid MIN_NOTIONAL
+FEE_BUFFER = Decimal(os.getenv("FEE_BUFFER", "0.001"))  # 0.1% default
 
 STATE_PATH = os.path.expanduser("~/doge_bot/state.json")
 
@@ -67,11 +67,11 @@ def load_state() -> Dict[str, Any]:
         except Exception as e:
             log.warning("state.json read failed: %s", e)
     return {
-        "processed_buys": [],          # רשימת buy orderIds שכבר פתחנו להם SELL
+        "processed_buys": [],          # BUY orderIds already processed (SELL opened)
         "child_sells": {},             # buyOrderId -> sellOrderId
         "buy_fills": {},               # buyOrderId -> {"price":..., "amount":...}
         "sell_fills": {},              # sellOrderId -> {"price":..., "amount":...}
-        "realized_profit_usd": 0.0,    # מצטבר
+        "realized_profit_usd": 0.0,    # Cumulative realized profit
     }
 
 def save_state(st: Dict[str, Any]) -> None:
@@ -89,7 +89,7 @@ def mk_exchange() -> ccxt.Exchange:
         "options": {
             "defaultType": "spot",
             "adjustForTimeDifference": True,
-            # חשוב: אל תבקש fetchCurrencies כדי לא ליפול על הרשאות
+            # Important: do not request fetchCurrencies to avoid permission issues
             "fetchCurrencies": False,
         }
     })
@@ -102,7 +102,7 @@ def load_precisions(exchange: ccxt.Exchange, symbol: str) -> Dict[str, Any]:
     price_tick  = Decimal(str(m["precision"]["price"])) if "precision" in m and "price" in m["precision"] else None
     amount_step = Decimal(str(m["precision"]["amount"])) if "precision" in m and "amount" in m["precision"] else None
 
-    # ננסה לחלץ tick/step אמיתיים מהפילטרים (עדיף)
+    # Try to extract real tick/step from filters (preferred)
     filters = m.get("info", {}).get("filters", [])
     _price_tick = None
     _amount_step = None
@@ -119,14 +119,14 @@ def load_precisions(exchange: ccxt.Exchange, symbol: str) -> Dict[str, Any]:
         if f.get("filterType") in ("MIN_NOTIONAL", "NOTIONAL"):
             min_notional = Decimal(str(f.get("minNotional", "1")))
 
-    if _price_tick:  # עדיף
+    if _price_tick:  # preferred
         price_tick = _price_tick
     if _amount_step:
         amount_step = _amount_step
     if not min_notional:
         min_notional = Decimal("1.0")
 
-    # price_precision/amount_precision לוגיים לתצוגה בלבד
+    # price_precision/amount_precision logical; display only
     price_precision = price_tick
     amount_precision = amount_step
 
@@ -140,24 +140,24 @@ def load_precisions(exchange: ccxt.Exchange, symbol: str) -> Dict[str, Any]:
     return info
 
 def round_price(price: Decimal, tick: Decimal) -> Decimal:
-    # מעגל מטה למכפלה הקרובה של tick
+    # Round down to nearest multiple of tick
     if tick <= 0:
         return price
     q = (price / tick).to_integral_value(rounding=ROUND_FLOOR)
     return (q * tick).quantize(tick, rounding=ROUND_HALF_UP)
 
 def round_amount(amount: Decimal, step: Decimal) -> Decimal:
-    # מעגל מטה לגודל לוט (step)
+    # Round down to lot size (step)
     if step <= 0:
         return amount
     q = (amount / step).to_integral_value(rounding=ROUND_FLOOR)
     return (q * step).quantize(step, rounding=ROUND_HALF_UP)
 
 def cid(prefix: str) -> str:
-    # ClientOrderId קצר
+    # Short ClientOrderId
     return f"{prefix}-{int(time.time()*1000)%10_000_000}"
 
-# ---------- הרצת הזמנות ----------
+# ---------- Order Placement ----------
 
 def place_limit_buy(ex: ccxt.Exchange, symbol: str, qty: Decimal, price: Decimal, client_id: Optional[str]=None) -> str:
     params = {"recvWindow": RECVWINDOW}
@@ -185,10 +185,10 @@ def place_limit_sell(ex: ccxt.Exchange, symbol: str, qty: Decimal, price: Decima
         log.info("(PAPER) SELL %s @ %s | id=%s", qty, price, "PAPER-"+client_id if client_id else "PAPER")
         return "PAPER-"+(client_id or "S")
 
-# ---------- לוגיקת גריד בסיסית + פאץ' SELL-אחרי-BUY ----------
+# ---------- Basic Grid Logic + SELL-after-BUY Patch ----------
 
 def compute_levels(lo: Decimal, hi: Decimal, step_pct: Decimal):
-    """יוצר רשימת רמות בין low..high במרווח גיאומטרי של step%"""
+    """Create list of levels between low..high with geometric spacing step%"""
     if lo <= 0 or hi <= 0 or hi <= lo:
         return []
     r = (Decimal("1.0") + (step_pct / Decimal("100")))
@@ -197,13 +197,13 @@ def compute_levels(lo: Decimal, hi: Decimal, step_pct: Decimal):
     while p <= hi + Decimal("1e-18"):
         levels.append(p)
         p = p * r
-    # לוודא שהגבול העליון בפנים
+    # Ensure upper bound included
     if levels[-1] < hi:
         levels.append(hi)
     return levels
 
 def bootstrap_buys(ex: ccxt.Exchange, info: Dict[str,Any], symbol: str, base_order_usd: Decimal, max_cycle_usd: Decimal):
-    """מניח מספר BUY (אם צריך) מתחת למחיר תוך שמירה על תקציב max_cycle_usd"""
+    """Place required BUY orders below price while respecting max_cycle_usd budget"""
     try:
         ticker = ex.fetch_ticker(symbol)
         last = d(ticker["last"])
@@ -212,21 +212,21 @@ def bootstrap_buys(ex: ccxt.Exchange, info: Dict[str,Any], symbol: str, base_ord
         return 0
 
     levels = compute_levels(GRID_LOW, GRID_HIGH, STEP_PCT)
-    # תיעדוף רמות שהן <= המחיר הנוכחי (קניות תחת המחיר)
+    # Keep levels <= current price (buys below current)
     levels = [L for L in levels if L <= last]
-    levels = list(reversed(levels))  # קרובות קודם
+    levels = list(reversed(levels))  # nearest first
 
     budget = max_cycle_usd
     placed = 0
     bal = ex.fetch_balance(params={"recvWindow": RECVWINDOW}) if MODE=="LIVE" else {"free": {"USDT": float(max_cycle_usd)}}
     usdt_free = d(bal["free"].get("USDT", 0.0))
 
-    # אם אין מספיק, נוותר
-    est_need = min(len(levels), 7) * base_order_usd  # מגבלה רכה
+    # If insufficient balance, skip
+    est_need = min(len(levels), 7) * base_order_usd  # soft cap
     if usdt_free < min(est_need, budget):
         log.warning("Not enough free USDT: %s. Need >= %s. Skipping placements.", usdt_free, min(est_need, budget))
 
-    for L in levels[:7]:  # לא להציף הזמנות
+    for L in levels[:7]:  # avoid flooding orders
         if budget < base_order_usd:
             break
         if usdt_free < base_order_usd:
@@ -235,9 +235,9 @@ def bootstrap_buys(ex: ccxt.Exchange, info: Dict[str,Any], symbol: str, base_ord
         qty = round_amount(base_order_usd / L, info["amount_step"])
         price = round_price(L, info["price_tick"])
 
-        # מינימום שווי
+        # Minimum notional check
         if qty * price < info["min_cost"]:
-            # נסה לעלות כמות מעט
+            # Try to raise quantity slightly
             need_qty = (info["min_cost"] / price) * (Decimal("1.0") + FEE_BUFFER)
             qty = round_amount(need_qty, info["amount_step"])
 
@@ -258,22 +258,22 @@ def bootstrap_buys(ex: ccxt.Exchange, info: Dict[str,Any], symbol: str, base_ord
 
 def handle_fills_and_post_sells(ex: ccxt.Exchange, info: Dict[str,Any], symbol: str, state: Dict[str,Any]):
     """
-    הפאץ' המינימלי:
-    - סורק הזמנות אחרונות.
-    - עבור כל BUY שנסגר ולא טופל: פותח SELL תואם במחיר יעד buy*(1+step%).
-    - עבור כל SELL שנסגר: מחשב רווח ממומש ומעדכן state + profit_split אם יש.
+    Minimal patch:
+    - Scan recent orders.
+    - For each filled BUY not yet processed: open corresponding SELL at buy*(1+step%).
+    - For each filled SELL: compute realized profit and update state + profit_split if applicable.
     """
-    # הזמנות אחרונות (כולל סגורות/מבוטלות)
+    # Recent orders (including closed/canceled)
     try:
         orders = ex.fetch_orders(symbol, limit=50)
     except Exception as e:
         log.error("fetch_orders failed: %s", e)
         return
 
-    # אינדקס מהיר לפי id
+    # Quick index by id
     by_id = {str(o["id"]): o for o in orders}
 
-    # 1) מצא BUY שנסגרו ועדיין אין להם SELL
+    # 1) Find BUY orders that closed and still have no SELL
     for o in orders:
         if o.get("symbol") != symbol:
             continue
@@ -282,30 +282,30 @@ def handle_fills_and_post_sells(ex: ccxt.Exchange, info: Dict[str,Any], symbol: 
 
         buy_id = str(o["id"])
         if buy_id in state["processed_buys"]:
-            continue  # כבר טיפלנו
+            continue  # already processed
 
         filled = d(o.get("filled") or o.get("amount") or 0)
         avg    = d(o.get("average") or o.get("price") or 0)
         if filled <= 0 or avg <= 0:
             continue
 
-        # יעד SELL: 1 + STEP_PCT%
+        # SELL target: 1 + STEP_PCT%
         target = round_price(avg * (Decimal("1.0") + (STEP_PCT/Decimal("100"))), info["price_tick"])
         qty_s  = round_amount(filled * (Decimal("1.0") - FEE_BUFFER), info["amount_step"])
 
         if qty_s * target < info["min_cost"]:
-            # הגבר מעט כדי לא לעבור על MIN_NOTIONAL
+            # Increase quantity slightly to satisfy MIN_NOTIONAL
             need_qty = (info["min_cost"] / target) * (Decimal("1.0") + FEE_BUFFER)
             qty_s = round_amount(need_qty, info["amount_step"])
 
         if qty_s <= 0:
             continue
 
-        sell_cid = cid(f"S{buy_id[-4:]}")  # client id עם זיהוי מהיר
+        sell_cid = cid(f"S{buy_id[-4:]}")  # client id with quick reference
 
         try:
             sell_id = place_limit_sell(ex, symbol, qty_s, target, client_id=sell_cid)
-            # עדכן state
+            # Update state
             state["processed_buys"].append(buy_id)
             state["child_sells"][buy_id] = sell_id
             state["buy_fills"][buy_id] = {"price": float(avg), "amount": float(filled)}
@@ -313,7 +313,7 @@ def handle_fills_and_post_sells(ex: ccxt.Exchange, info: Dict[str,Any], symbol: 
         except Exception as e:
             log.error("open SELL for BUY %s failed: %s", buy_id, e)
 
-    # 2) בדוק SELL שסגור — חשב רווח
+    # 2) For each closed SELL compute profit
     for o in orders:
         if o.get("symbol") != symbol:
             continue
@@ -322,14 +322,14 @@ def handle_fills_and_post_sells(ex: ccxt.Exchange, info: Dict[str,Any], symbol: 
 
         sell_id = str(o["id"])
         if sell_id in state["sell_fills"]:
-            continue  # כבר נרשם
+            continue  # already recorded
 
         s_filled = d(o.get("filled") or o.get("amount") or 0)
         s_avg    = d(o.get("average") or o.get("price") or 0)
         if s_filled <= 0 or s_avg <= 0:
             continue
 
-        # מצא buy ההורה (לפי state.child_sells)
+        # Find parent BUY (via state.child_sells)
         parent_buy = None
         for b, s in state["child_sells"].items():
             if s == sell_id:
@@ -340,7 +340,7 @@ def handle_fills_and_post_sells(ex: ccxt.Exchange, info: Dict[str,Any], symbol: 
         if parent_buy and parent_buy in state["buy_fills"]:
             bdat = state["buy_fills"][parent_buy]
             b_avg = d(bdat["price"])
-            # התאמת כמות: נחשב על המינימום המשותף (זהירות מביטולים חלקיים)
+            # Quantity adjustment: min common amount (handle partial cancellations)
             qty_base = min(s_filled, d(bdat["amount"]))
             profit_usd = (s_avg - b_avg) * qty_base
 
@@ -351,7 +351,7 @@ def handle_fills_and_post_sells(ex: ccxt.Exchange, info: Dict[str,Any], symbol: 
             state["realized_profit_usd"] = float(newv)
             log.info("Realized profit: +%.4f USDT (total=%.4f)", float(profit_usd), float(newv))
 
-            # קריאה למודול הפיצול (אם קיים)
+            # Call profit split module (if present)
             try:
                 if profit_split and hasattr(profit_split, "on_realized_profit"):
                     profit_split.on_realized_profit(ex, float(profit_usd))
@@ -374,7 +374,7 @@ def run():
 
     ex = mk_exchange()
 
-    # ניסיון לטעון שווקים — לטפל באימות שגוי מראש
+    # Attempt to load markets — fail fast on auth errors
     try:
         info = load_precisions(ex, PAIR)
     except ccxt.AuthenticationError as e:
@@ -394,11 +394,11 @@ def run():
 
     state = load_state()
 
-    # Bootstrap רכישות מתחת למחיר כדי לתת מהן SELL אחר כך
+    # Bootstrap buys below current price to later create SELL orders
     log.info("Starting base_order_usd = %.1f", float(BASE_ORDER_USD))
     bootstrap_buys(ex, info, PAIR, BASE_ORDER_USD, MAX_CYCLE_USD)
 
-    # לולאת הרצה
+    # Main loop
     stop = False
     def _sig(_a, _b):
         nonlocal stop
@@ -408,10 +408,10 @@ def run():
 
     poll_sec = int(os.getenv("POLL_SECONDS", "7"))
     while not stop:
-        # הפאץ' המינימלי: טפל במילויי BUY -> פתח SELL; ומכור -> חשב רווח
+    # Minimal patch: process filled BUY -> open SELL; on SELL fill compute profit
         handle_fills_and_post_sells(ex, info, PAIR, state)
 
-        # אפשר להוסיף כאן לוגיקות נוספות (recenter, חידוש BUY אם מחסור, וכו’) – לא נגענו
+    # Additional logic (recenter, replenish BUY if shortage, etc.) can be added here – untouched
         time.sleep(poll_sec)
 
     log.info("Exiting main loop.")

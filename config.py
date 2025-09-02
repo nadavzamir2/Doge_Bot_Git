@@ -83,6 +83,12 @@ GRID_MIN = _get_env_float("GRID_MIN") or _get_env_float("GRID_LOW")
 GRID_MAX = _get_env_float("GRID_MAX") or _get_env_float("GRID_HIGH")
 GRID_STEP_PCT = _get_env_float("GRID_STEP_PCT") or _get_env_float("STEP_PCT")
 
+# Feature toggles
+DISABLE_REGRID = os.getenv("DISABLE_REGRID", "0").strip() in ("1", "true", "True", "YES", "yes")
+
+# Force dashboard tables to always use local JSON data instead of live exchange
+FORCE_LOCAL_DATA = os.getenv("FORCE_LOCAL_DATA", "0").strip() in ("1","true","True","YES","yes")
+
 # Order sizing and budget parameters
 BASE_ORDER_USD = _get_env_decimal("BASE_ORDER_USD", "5.0")
 MAX_CYCLE_USD = _get_env_decimal("MAX_CYCLE_USD", "40.0")
