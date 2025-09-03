@@ -1008,7 +1008,7 @@ HTML = r"""<!doctype html>
   .auth-missing { background:#fffbea; border-color:#fbd38d; color:#975a16; }
   .auth-error { background:#ffecec; border-color:#feb2b2; color:#c53030; }
 </style>
-<script src="https://unpkg.com/plotly.js@2.35.2/dist/plotly.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
   <div class="wrap">
