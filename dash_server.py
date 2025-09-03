@@ -1790,6 +1790,9 @@ function setupChartSynchronization() {
     if (eventData['xaxis.range[0]'] !== undefined && eventData['xaxis.range[1]'] !== undefined) {
       const newXRange = [eventData['xaxis.range[0]'], eventData['xaxis.range[1]']];
       Plotly.relayout(axisChart, {'xaxis.range': newXRange});
+      
+      // Update dynamic time labels for the axis chart
+      updateDynamicTimeLabels(axisChart, newXRange);
     }
   });
   
@@ -1798,6 +1801,59 @@ function setupChartSynchronization() {
     if (eventData['xaxis.range[0]'] !== undefined && eventData['xaxis.range[1]'] !== undefined) {
       const newXRange = [eventData['xaxis.range[0]'], eventData['xaxis.range[1]']];
       Plotly.relayout(mainChart, {'xaxis.range': newXRange});
+      
+      // Update dynamic time labels for the axis chart
+      updateDynamicTimeLabels(axisChart, newXRange);
+    }
+  });
+}
+
+// Update time labels dynamically based on zoom level
+function updateDynamicTimeLabels(chartElement, xRange) {
+  if (!xRange || xRange.length !== 2) return;
+  
+  const startTime = new Date(xRange[0]).getTime();
+  const endTime = new Date(xRange[1]).getTime();
+  const timeSpan = endTime - startTime;
+  
+  let tickformat, dtick;
+  
+  // Determine appropriate time label density and format based on zoom level
+  if (timeSpan <= 3600000) { // 1 hour or less - show minutes
+    tickformat = "%H:%M";
+    dtick = 300000; // 5-minute intervals
+  } else if (timeSpan <= 43200000) { // 12 hours or less - show hours
+    tickformat = "%H:%M";
+    dtick = 1800000; // 30-minute intervals  
+  } else if (timeSpan <= 86400000) { // 1 day or less - show hours
+    tickformat = "%H:%M<br><i style='font-size:0.8em'>(%d/%m)</i>";
+    dtick = 3600000; // 1-hour intervals
+  } else if (timeSpan <= 604800000) { // 1 week or less - show days
+    tickformat = "%d/%m<br><i style='font-size:0.8em'>(%H:00)</i>";
+    dtick = 86400000; // 1-day intervals
+  } else { // More than 1 week - show days with fewer labels
+    tickformat = "%d/%m<br><i style='font-size:0.8em'>%Y</i>";
+    dtick = 604800000; // 1-week intervals
+  }
+  
+  // Apply the new tick formatting
+  Plotly.relayout(chartElement, {
+    'xaxis.tickformat': tickformat,
+    'xaxis.dtick': dtick
+  });
+}
+
+// Setup dynamic time labels for regular (non-sticky) chart mode
+function setupDynamicTimeLabelsForRegularChart() {
+  if (STICKY_AXIS_ENABLED) return;
+  
+  const chartElement = document.getElementById('chart');
+  if (!chartElement) return;
+  
+  chartElement.on('plotly_relayout', function(eventData) {
+    if (eventData['xaxis.range[0]'] !== undefined && eventData['xaxis.range[1]'] !== undefined) {
+      const newXRange = [eventData['xaxis.range[0]'], eventData['xaxis.range[1]']];
+      updateDynamicTimeLabels(chartElement, newXRange);
     }
   });
 }
@@ -2110,7 +2166,7 @@ async function updateChart() {
       });
     }
   }
-  Plotly.relayout('chart', {
+  Plotly.relayout(getMainChartElement(), {
     shapes: shapes,
     'yaxis.tickmode': 'array',
     'yaxis.tickvals': yTicksVals,
@@ -2758,6 +2814,14 @@ async function boot(){
   await loadStats();
   await loadInitialInvestments();
   await loadHistory();    // load history before starting stream
+  
+  // Setup dynamic time labels and chart synchronization after chart is ready
+  if (STICKY_AXIS_ENABLED) {
+    setupChartSynchronization();
+  } else {
+    setupDynamicTimeLabelsForRegularChart();
+  }
+  
   startSSE();             // then live stream for price + statistics
   await loadOpenOrders();
   await loadHistoryOrders();
