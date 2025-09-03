@@ -941,6 +941,26 @@ HTML = r"""<!doctype html>
     margin-left: 8px;
   }
   
+  /* Sticky X-axis feature styles */
+  .sticky-x-axis {
+    position: sticky;
+    bottom: 0;
+    background: white;
+    border-top: 1px solid #eee;
+    z-index: 10;
+    padding: 4px 0;
+  }
+  
+  .chart-container.sticky-mode {
+    position: relative;
+  }
+  
+  .chart-container.sticky-mode .plotly .xaxis {
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+  }
+  
   @keyframes spin {
     to { transform: rotate(360deg); }
   }
@@ -1057,26 +1077,6 @@ HTML = r"""<!doctype html>
       <details open id="chartBox">
         <summary>Price Chart</summary>
         <div class="section-body">
-          <!-- Color Legend -->
-          <div style="margin-bottom: 12px; padding: 8px; background: #f8f9fa; border-radius: 6px; font-size: 12px;">
-            <strong>Chart Legend:</strong>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(46, 204, 113, 0.6); margin-right: 4px;"></span>
-              <span style="color: #2c7a7b;">Buy Orders</span>
-            </span>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(243, 156, 18, 0.6); margin-right: 4px;"></span>
-              <span style="color: #c53030;">Sell Orders</span>
-            </span>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(139, 92, 246, 0.8); margin-right: 4px;"></span>
-              <span style="color: #8b5cf6;">Grid Boundaries</span>
-            </span>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 1px; background: #cccccc; margin-right: 4px;"></span>
-              <span style="color: #666;">Gray Latitudes</span>
-            </span>
-          </div>
           <style>
             .control-row { display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; }
             .ctrl { display:flex; align-items:center; gap:6px; user-select:none; }
@@ -1108,10 +1108,34 @@ HTML = r"""<!doctype html>
               <input id="autoZoom" type="checkbox"/>
               <span>Auto zoom</span>
             </label>
+            <label style="display:flex;align-items:center;gap:6px;user-select:none">
+              <input id="stickyXAxis" type="checkbox"/>
+              <span>Sticky X-axis</span>
+            </label>
             <!-- legend toggle removed (always show price curve) -->
           </div>
-          <div id="chartScroll" style="max-height:520px; overflow-y:auto; border:1px solid #eee; border-radius:4px;">
+          <div id="chartScroll" class="chart-container" style="max-height:520px; overflow-y:auto; border:1px solid #eee; border-radius:4px;">
             <div id="chart" style="height:520px;"></div>
+          </div>
+          <!-- Color Legend - Relocated to bottom with feature flag -->
+          <div id="chartLegend" style="margin-top: 12px; padding: 8px; background: #f8f9fa; border-radius: 6px; font-size: 12px; display: none;">
+            <strong>Chart Legend:</strong>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(46, 204, 113, 0.6); margin-right: 4px;"></span>
+              <span style="color: #2c7a7b;">Buy Orders</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(243, 156, 18, 0.6); margin-right: 4px;"></span>
+              <span style="color: #c53030;">Sell Orders</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(139, 92, 246, 0.8); margin-right: 4px;"></span>
+              <span style="color: #8b5cf6;">Grid Boundaries</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 1px; background: #cccccc; margin-right: 4px;"></span>
+              <span style="color: #666;">Gray Latitudes</span>
+            </span>
           </div>
         </div>
       </details>
@@ -1227,7 +1251,7 @@ HTML = r"""<!doctype html>
 <script>
 "use strict";
 
-var showGridEl, showActiveEl, showLatEl, autoZoomEl, showPriceLineEl; // controls including auto-zoom + price line toggle
+var showGridEl, showActiveEl, showLatEl, autoZoomEl, showPriceLineEl, stickyXAxisEl; // controls including auto-zoom + price line toggle + sticky axis
 
 const PAIR = {{ pair|tojson }};
 const SPLIT_TRIGGER_ENV = {{ split_trigger_env|tojson }};
@@ -1403,14 +1427,22 @@ function setLoadingState(id) {
   cardLoadingStates.add(id);
   const el = document.getElementById(id);
   if (el) {
-    // Make loading more visible with explicit text
+    // Make loading more visible with explicit text and improved styling
     el.innerHTML = '<span class="loading-indicator"></span> Loading...';
+    el.style.opacity = '0.7';
+    el.style.pointerEvents = 'none';
   }
 }
 
 function clearLoadingState(id) {
   cardLoadingStates.delete(id);
   initializedCards.add(id);
+  const el = document.getElementById(id);
+  if (el) {
+    // Restore normal state
+    el.style.opacity = '1';
+    el.style.pointerEvents = 'auto';
+  }
 }
 
 function isCardLoading(id) {
@@ -1811,7 +1843,10 @@ async function updateChart() {
 
   // Add dynamic current price horizontal reference line (always on top)
   if (isFinite(currentPrice)) {
-    const enabled = (localStorage.getItem('showPriceLine') !== '0');
+    // Feature flag for always visible price marker (backwards compatible)
+    const alwaysShowPrice = (localStorage.getItem('alwaysShowPriceMarker') !== '0');
+    const priceLineEnabled = (localStorage.getItem('showPriceLine') !== '0');
+    const enabled = alwaysShowPrice || priceLineEnabled;
     if (enabled) {
       // Distinct vivid color & slightly thicker for visibility
       shapes.push(shapeForY(currentPrice, 'rgba(255, 0, 102, 0.9)', 2.5, 'solid'));
@@ -2103,6 +2138,21 @@ function setupChartControls() {
         localStorage.setItem('followPrice','0');
       }
       updateChart();
+    });
+  }
+  
+  // Sticky X-axis toggle
+  if (stickyXAxisEl) {
+    stickyXAxisEl.checked = (localStorage.getItem('stickyXAxis') === '1');
+    stickyXAxisEl.addEventListener('change', () => {
+      toggleStickyXAxis(stickyXAxisEl.checked);
+      // Force chart resize to apply sticky styles
+      setTimeout(() => {
+        const chartEl = document.getElementById('chart');
+        if (chartEl && window.Plotly) {
+          Plotly.Plots.resize(chartEl);
+        }
+      }, 100);
     });
   }
   const savedMode = localStorage.getItem('chartMode') || 'grid';
@@ -2653,14 +2703,114 @@ function exportHistoryCSV(){
   setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 500);
 }
 
+/* ===== UX Improvements ===== */
+
+function initializeUXImprovements() {
+  // 1. Initialize legend position feature flag (default: bottom)
+  const legendPosition = localStorage.getItem('chartLegendPosition') || 'bottom';
+  toggleLegendPosition(legendPosition);
+  
+  // 2. Initialize always visible price marker feature flag (default: true)
+  const alwaysShowPrice = localStorage.getItem('alwaysShowPriceMarker') !== '0';
+  if (alwaysShowPrice) {
+    localStorage.setItem('alwaysShowPriceMarker', '1');
+  }
+  
+  // 3. Initialize sticky X-axis feature flag (default: false)
+  const stickyXAxis = localStorage.getItem('stickyXAxis') === '1';
+  if (stickyXAxisEl) {
+    stickyXAxisEl.checked = stickyXAxis;
+    toggleStickyXAxis(stickyXAxis);
+  }
+  
+  // 4. Initialize dynamic time labels (always enabled)
+  if (window.Plotly && document.getElementById('chart')) {
+    setupDynamicTimeLabels();
+  }
+}
+
+function toggleLegendPosition(position) {
+  const legendEl = document.getElementById('chartLegend');
+  if (legendEl) {
+    if (position === 'bottom') {
+      legendEl.style.display = 'block';
+    } else {
+      legendEl.style.display = 'none';
+    }
+  }
+}
+
+function toggleStickyXAxis(enabled) {
+  const chartContainer = document.getElementById('chartScroll');
+  if (chartContainer) {
+    if (enabled) {
+      chartContainer.classList.add('sticky-mode');
+    } else {
+      chartContainer.classList.remove('sticky-mode');
+    }
+  }
+  localStorage.setItem('stickyXAxis', enabled ? '1' : '0');
+}
+
+function setupDynamicTimeLabels() {
+  // Enhanced time label formatting based on zoom level
+  const chartEl = document.getElementById('chart');
+  if (!chartEl) return;
+  
+  // Listen for plotly relayout events (zoom/pan)
+  chartEl.on('plotly_relayout', function(eventData) {
+    if (eventData['xaxis.range[0]'] || eventData['xaxis.range[1]']) {
+      updateTimeLabelsForZoom(eventData);
+    }
+  });
+}
+
+function updateTimeLabelsForZoom(eventData) {
+  const chartEl = document.getElementById('chart');
+  if (!chartEl || !chartEl.layout) return;
+  
+  try {
+    const xRange = chartEl.layout.xaxis.range;
+    if (!xRange || xRange.length < 2) return;
+    
+    const startTime = new Date(xRange[0]);
+    const endTime = new Date(xRange[1]);
+    const timeDiff = endTime - startTime;
+    
+    // Dynamic formatting based on time range
+    let tickformat;
+    if (timeDiff < 3600000) { // Less than 1 hour
+      tickformat = "%H:%M:%S";
+    } else if (timeDiff < 86400000) { // Less than 1 day  
+      tickformat = "%H:%M";
+    } else if (timeDiff < 604800000) { // Less than 1 week
+      tickformat = "%m/%d<br>%H:%M";
+    } else {
+      tickformat = "%m/%d<br>%Y";
+    }
+    
+    // Update layout with new tick format
+    Plotly.relayout(chartEl, {
+      'xaxis.tickformat': tickformat
+    });
+  } catch (e) {
+    console.warn('Dynamic time label update failed:', e);
+  }
+}
+
 async function boot(){
   showGridEl = document.getElementById('showGrid');
   showActiveEl = document.getElementById('showActiveLayers');
   showLatEl = document.getElementById('showLat');
   showPriceLineEl = document.getElementById('showPriceLine');
+  stickyXAxisEl = document.getElementById('stickyXAxis');
   // price marker always visible (legacy toggle removed)
   followPriceEl = document.getElementById('followPrice');
   autoZoomEl = document.getElementById('autoZoom');
+  
+  // Initialize UX improvements with feature flags
+  initializeUXImprovements();
+  
   wireControls();
   
   // Initialize loading states for cards that start with dashes
