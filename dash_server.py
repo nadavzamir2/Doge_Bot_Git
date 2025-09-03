@@ -1121,7 +1121,17 @@ HTML = r"""<!doctype html>
             <!-- legend toggle removed (always show price curve) -->
           </div>
           <!-- Remove scrollbox wrapper for cleaner layout -->
+          <!-- Conditional chart layout based on sticky axis feature flag -->
+          {% if sticky_axis_enabled %}
+          <!-- Sticky axis mode: separate data plot and time axis -->
+          <div id="chart-container">
+            <div id="chart-main" style="height:420px; border:1px solid #eee; border-radius:4px 4px 0 0; border-bottom:none;"></div>
+            <div id="chart-axis" style="height:100px; border:1px solid #eee; border-radius:0 0 4px 4px; border-top:none;"></div>
+          </div>
+          {% else %}
+          <!-- Legacy mode: single chart -->
           <div id="chart" style="height:520px; border:1px solid #eee; border-radius:4px;"></div>
+          {% endif %}
         </div>
       </details>
 
@@ -1243,6 +1253,7 @@ const SPLIT_TRIGGER_ENV = {{ split_trigger_env|tojson }};
 const SPLIT_CHUNK_USD = {{ split_chunk_usd|tojson }};
 const BASE_ORDER_USD = {{ base_order_usd|tojson }};
 const MAX_USD_FOR_CYCLE = {{ max_usd_for_cycle|tojson }};
+const STICKY_AXIS_ENABLED = {{ sticky_axis_enabled|tojson }};
 document.getElementById('pair').textContent = PAIR;
 
 /* range & spacing from server-side (env), if provided */
@@ -1392,9 +1403,19 @@ function sanitizeChartData(data) {
   });
 }
 
+// Helper to get main chart element based on mode
+function getMainChartElement() {
+  return STICKY_AXIS_ENABLED ? document.getElementById('chart-main') : document.getElementById('chart');
+}
+
+// Helper to get axis chart element (only for sticky mode)
+function getAxisChartElement() {
+  return STICKY_AXIS_ENABLED ? document.getElementById('chart-axis') : null;
+}
+
 function showChartError(message) {
   console.error('Chart error:', message);
-  const chartEl = document.getElementById('chart');
+  const chartEl = getMainChartElement();
   if (chartEl) {
     chartEl.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--muted); border: 1px dashed #ccc; background: #f9f9f9;">
       <p style="margin: 0; font-size: 14px;">⚠️ Chart Error</p>
@@ -1755,6 +1776,32 @@ async function loadHistory(){
 
 /* ===== Chart Line and Tick Logic ===== */
 
+// Synchronize zoom and pan between main chart and axis chart in sticky mode
+function setupChartSynchronization() {
+  if (!STICKY_AXIS_ENABLED) return;
+  
+  const mainChart = document.getElementById('chart-main');
+  const axisChart = document.getElementById('chart-axis');
+  
+  if (!mainChart || !axisChart) return;
+  
+  // Sync x-axis range changes from main chart to axis chart
+  mainChart.on('plotly_relayout', function(eventData) {
+    if (eventData['xaxis.range[0]'] !== undefined && eventData['xaxis.range[1]'] !== undefined) {
+      const newXRange = [eventData['xaxis.range[0]'], eventData['xaxis.range[1]']];
+      Plotly.relayout(axisChart, {'xaxis.range': newXRange});
+    }
+  });
+  
+  // Sync x-axis range changes from axis chart to main chart
+  axisChart.on('plotly_relayout', function(eventData) {
+    if (eventData['xaxis.range[0]'] !== undefined && eventData['xaxis.range[1]'] !== undefined) {
+      const newXRange = [eventData['xaxis.range[0]'], eventData['xaxis.range[1]']];
+      Plotly.relayout(mainChart, {'xaxis.range': newXRange});
+    }
+  });
+}
+
 // Helper to create a line shape for Plotly
 function shapeForY(y, color, width, dash) {
     return {
@@ -1767,9 +1814,8 @@ function shapeForY(y, color, width, dash) {
 // Main function to update chart lines and ticks based on the selected mode
 async function updateChart() {
     if (!_chartReady) return;
-    const chartEl = document.getElementById('chart');
+    const chartEl = getMainChartElement();
     if (!chartEl || !chartEl.layout) return;
-  const scrollWrap = document.getElementById('chartScroll');
 
     const mode = localStorage.getItem('chartMode') || 'grid';
     const currentPrice = window.__currentPrice;
