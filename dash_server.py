@@ -37,6 +37,9 @@ except Exception:
 
 # Dashboard-specific runtime structures
 MAX_HISTORY = int(os.getenv("DASH_MAX_HISTORY", "10000"))
+# Feature flags for UX improvements
+DASH_STICKY_AXIS = os.getenv("DASH_STICKY_AXIS", "0") == "1"
+DASH_SPINNER_DELAY_MS = int(os.getenv("DASH_SPINNER_DELAY_MS", "1200"))
 from collections import deque as _deque
 PRICE_WINDOW = _deque([], maxlen=MAX_HISTORY)
 HISTORY_LOCK = threading.Lock()
@@ -1057,32 +1060,39 @@ HTML = r"""<!doctype html>
       <details open id="chartBox">
         <summary>Price Chart</summary>
         <div class="section-body">
-          <!-- Color Legend -->
-          <div style="margin-bottom: 12px; padding: 8px; background: #f8f9fa; border-radius: 6px; font-size: 12px;">
-            <strong>Chart Legend:</strong>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(46, 204, 113, 0.6); margin-right: 4px;"></span>
-              <span style="color: #2c7a7b;">Buy Orders</span>
-            </span>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(243, 156, 18, 0.6); margin-right: 4px;"></span>
-              <span style="color: #c53030;">Sell Orders</span>
-            </span>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(139, 92, 246, 0.8); margin-right: 4px;"></span>
-              <span style="color: #8b5cf6;">Grid Boundaries</span>
-            </span>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 1px; background: #cccccc; margin-right: 4px;"></span>
-              <span style="color: #666;">Gray Latitudes</span>
-            </span>
-          </div>
           <style>
             .control-row { display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; }
             .ctrl { display:flex; align-items:center; gap:6px; user-select:none; }
             .ctrl-marker span { font-family: 'Courier New', monospace; font-weight:500; letter-spacing:0.3px; font-size:11px; color:#ff5c99; opacity:0.85; }
             .control-row .spacer { flex:1 1 auto; }
+            .legend-row { display:flex; gap:12px; margin-bottom:12px; flex-wrap:wrap; align-items:center; padding:8px; background:#f8f9fa; border-radius:6px; font-size:12px; }
+            .legend-item { display:flex; align-items:center; gap:4px; }
+            .legend-color { display:inline-block; width:12px; height:2px; }
           </style>
+          <!-- Color Legend moved to top row alongside controls -->
+          <div class="legend-row">
+            <strong>Chart Legend:</strong>
+            <div class="legend-item">
+              <span class="legend-color" style="background: rgba(46, 204, 113, 0.6);"></span>
+              <span style="color: #2c7a7b;">Buy Orders</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-color" style="background: rgba(243, 156, 18, 0.6);"></span>
+              <span style="color: #c53030;">Sell Orders</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-color" style="background: rgba(139, 92, 246, 0.8);"></span>
+              <span style="color: #8b5cf6;">Grid Boundaries</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-color" style="background: #cccccc; height:1px;"></span>
+              <span style="color: #666;">Gray Latitudes</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-color" style="background: rgba(255, 0, 102, 0.9);"></span>
+              <span style="color: #ff0066;">Live Price</span>
+            </div>
+          </div>
           <div class="control-row">
             <label style="display:flex;align-items:center;gap:6px;user-select:none">
               <input id="showGrid" type="checkbox" checked/>
@@ -1110,9 +1120,8 @@ HTML = r"""<!doctype html>
             </label>
             <!-- legend toggle removed (always show price curve) -->
           </div>
-          <div id="chartScroll" style="max-height:520px; overflow-y:auto; border:1px solid #eee; border-radius:4px;">
-            <div id="chart" style="height:520px;"></div>
-          </div>
+          <!-- Remove scrollbox wrapper for cleaner layout -->
+          <div id="chart" style="height:520px; border:1px solid #eee; border-radius:4px;"></div>
         </div>
       </details>
 
@@ -1474,21 +1483,40 @@ function initializeCardLoadingStates() {
       setLoadingState(id);
     }
   });
+  
+  // Set timer to show loading spinners after the configured delay (DASH_SPINNER_DELAY_MS)
+  const spinnerDelay = {{ spinner_delay_ms|tojson }};
+  setTimeout(() => {
+    cardIds.forEach(id => {
+      if (isCardLoading(id) && !isCardInitialized(id)) {
+        const el = document.getElementById(id);
+        if (el && el.textContent === '—') {
+          setLoadingState(id);
+        }
+      }
+    });
+  }, spinnerDelay);
 }
 
 /* ===== stats (polling fallback) ===== */
 async function loadStats(){
-  // Only show loading indicators the first time (avoid flicker / delay perception)
-  if(!isCardInitialized('profitVal') && !isCardLoading('profitVal')){
-    setLoadingState('profitVal');
-  }
+  // Set loading state for key cards that should show immediate loading indicators
   if(!isCardInitialized('sellTradesVal') && !isCardLoading('sellTradesVal')){
     setLoadingState('sellTradesVal');
+  }
+  if(!isCardInitialized('actualSplitsVal') && !isCardLoading('actualSplitsVal')){
+    setLoadingState('actualSplitsVal');
+  }
+  if(!isCardInitialized('profitVal') && !isCardLoading('profitVal')){
+    setLoadingState('profitVal');
   }
   
   try{
     const r = await fetch('/api/stats');
     const j = await r.json();
+    
+    // Atomic update to prevent flicker - batch all card updates
+    const updates = {};
     
     // Handle price separately since it uses a different format
     if('price' in j && j.price !== null) {
@@ -1502,6 +1530,7 @@ async function loadStats(){
       setText('priceVal', null, 6);
     }
     
+    // Prepare atomic updates for all cards
     setText('profitVal', j.profit_usd, 2);
     setText('sellTradesVal', j.sell_trades_count, 0);
     setText('actualSplitsVal', j.actual_splits_count, 0);
@@ -1516,7 +1545,9 @@ async function loadStats(){
 
     updateProfitWithTrigger(j.profit_usd ?? 0, j.actual_splits_count ?? 0);
     updateLastUpdated();
-  }catch(e){}
+  }catch(e){
+    console.warn('Failed to load stats:', e);
+  }
 }
 
 /* ===== Load initial investments ===== */
@@ -1666,8 +1697,7 @@ async function loadHistory(){
       })();
     }
     const data = [
-      { x: xs, y: ys, mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'} },
-  { x:[xs[xs.length-1]], y:[ys[ys.length-1]], mode:'markers', name:'price', marker:{color:'#ff0066', size:10, line:{color:'#fff', width:1}}, hoverinfo:'none', visible:true }
+      { x: xs, y: ys, mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'} }
     ];
     
   console.log('DEBUG: About to call Plotly.react. Data:', data, 'Layout:', layout);
@@ -1690,8 +1720,7 @@ async function loadHistory(){
       
       await Plotly.newPlot('chart',
         [
-          {x:[], y:[], mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'}},
-          {x:[], y:[], mode:'markers', name:'price', marker:{color:'#ff0066', size:10, line:{color:'#fff', width:1}}, hoverinfo:'none', visible:true }
+          {x:[], y:[], mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'}}
         ],
         { margin:{l:80,r:20,t:10,b:50},
           xaxis:{ 
@@ -1817,6 +1846,22 @@ async function updateChart() {
       shapes.push(shapeForY(currentPrice, 'rgba(255, 0, 102, 0.9)', 2.5, 'solid'));
       yTicksVals.push(currentPrice);
     }
+  }
+
+  // Always add red price marker as overlay shape (cannot be hidden by legend toggles)
+  if (isFinite(currentPrice)) {
+    // Add a small circle marker at the current price point
+    shapes.push({
+      type: 'circle',
+      xref: 'paper',
+      yref: 'y',
+      x0: 0.99,
+      y0: currentPrice - (currentPrice * 0.001), // Small offset for circle
+      x1: 1.01,
+      y1: currentPrice + (currentPrice * 0.001),
+      fillcolor: 'rgba(255, 0, 102, 0.8)',
+      line: { color: 'rgba(255, 255, 255, 0.9)', width: 1.5 }
+    });
   }
 
   // (Initial tick list built; finalization happens after boundary-touch augmentation below)
@@ -2184,8 +2229,7 @@ function startSSE(){
             
             await Plotly.newPlot('chart',
               [
-                { x:[t], y:[j.p], mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'} },
-                { x:[t], y:[j.p], mode:'markers', name:'price', marker:{color:'#ff0066', size:10, line:{color:'#fff', width:1}}, hoverinfo:'none', visible:true }
+                { x:[t], y:[j.p], mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'} }
               ],
               { margin:{l:80,r:20,t:10,b:50},
                 xaxis:{ 
@@ -2234,8 +2278,7 @@ function startSSE(){
               
               await Plotly.newPlot('chart',
                 [
-                  { x:[t], y:[j.p], mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'} },
-                  { x:[t], y:[j.p], mode:'markers', name:'price', marker:{color:'#ff0066', size:10, line:{color:'#fff', width:1}}, hoverinfo:'none', visible:true }
+                  { x:[t], y:[j.p], mode:'lines', name: PAIR, line:{width:1.5,color:'#1f77b4'} }
                 ],
                 { margin:{l:80,r:20,t:10,b:50},
                   xaxis:{ 
@@ -2727,6 +2770,8 @@ def index():
         split_chunk_usd=SPLIT_CHUNK_USD,
         base_order_usd=BASE_ORDER_USD,
         max_usd_for_cycle=MAX_USD_FOR_CYCLE,
+        spinner_delay_ms=DASH_SPINNER_DELAY_MS,
+        sticky_axis_enabled=DASH_STICKY_AXIS,
     )
     response = make_response(html_content)
     # Add cache-busting headers
