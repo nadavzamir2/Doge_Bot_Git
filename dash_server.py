@@ -1008,7 +1008,7 @@ HTML = r"""<!doctype html>
   .auth-missing { background:#fffbea; border-color:#fbd38d; color:#975a16; }
   .auth-error { background:#ffecec; border-color:#feb2b2; color:#c53030; }
 </style>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="https://unpkg.com/plotly.js@2.35.2/dist/plotly.min.js"></script>
 </head>
 <body>
   <div class="wrap">
@@ -1706,6 +1706,7 @@ async function loadHistory(){
   console.log('Creating chart with', data[0].x.length, 'data points');
   await Plotly.react('chart', data, layout, {displayModeBar:false});
     _chartReady = true;
+    setupDynamicTimeLabels();  // Setup event handlers after chart is ready
     updateChart();
     updateLastUpdated();
     console.log('Chart loaded successfully');
@@ -1745,6 +1746,7 @@ async function loadHistory(){
           shapes: [] },
         { displayModeBar:false });
       _chartReady = true;
+      setupDynamicTimeLabels();  // Setup event handlers after fallback chart is ready
       updateChart();
       updateLastUpdated();
       console.log('Fallback empty chart created');
@@ -2257,6 +2259,7 @@ function startSSE(){
                 shapes: [] },
               { displayModeBar:false });
             _chartReady = true;
+            setupDynamicTimeLabels();  // Setup event handlers after chart recreation
             updateChart();
             updateLastUpdated();
             console.log('Chart initialized with tick data');
@@ -2307,6 +2310,7 @@ function startSSE(){
                   shapes: [] },
                 { displayModeBar:false });
               _chartReady = true;
+              setupDynamicTimeLabels();  // Setup event handlers after chart recreation
               updateChart();
               updateLastUpdated();
               console.log('Chart recreated successfully');
@@ -2722,11 +2726,6 @@ function initializeUXImprovements() {
     stickyXAxisEl.checked = stickyXAxis;
     toggleStickyXAxis(stickyXAxis);
   }
-  
-  // 4. Initialize dynamic time labels (always enabled)
-  if (window.Plotly && document.getElementById('chart')) {
-    setupDynamicTimeLabels();
-  }
 }
 
 function toggleLegendPosition(position) {
@@ -2755,9 +2754,16 @@ function toggleStickyXAxis(enabled) {
 function setupDynamicTimeLabels() {
   // Enhanced time label formatting based on zoom level
   const chartEl = document.getElementById('chart');
-  if (!chartEl) return;
+  if (!chartEl || !window.Plotly) return;
   
-  // Listen for plotly relayout events (zoom/pan)
+  // Remove any existing event listeners first to avoid duplicates
+  try {
+    chartEl.removeAllListeners && chartEl.removeAllListeners('plotly_relayout');
+  } catch (e) {
+    // Ignore if removeAllListeners doesn't exist
+  }
+  
+  // Listen for plotly relayout events (zoom/pan) using Plotly's event API
   chartEl.on('plotly_relayout', function(eventData) {
     if (eventData['xaxis.range[0]'] || eventData['xaxis.range[1]']) {
       updateTimeLabelsForZoom(eventData);
@@ -2795,6 +2801,44 @@ function updateTimeLabelsForZoom(eventData) {
     });
   } catch (e) {
     console.warn('Dynamic time label update failed:', e);
+  }
+}
+
+function applyAutoRefreshInterval() {
+  // Clear any existing interval
+  if (window._autoRefreshTimer) {
+    clearInterval(window._autoRefreshTimer);
+  }
+  
+  try {
+    const input = document.getElementById('autoRefreshMs');
+    if (!input) return;
+    
+    const intervalMs = parseInt(input.value, 10);
+    if (isNaN(intervalMs) || intervalMs < 5000) {
+      console.warn('Invalid refresh interval, using default 25000ms');
+      input.value = '25000';
+      return;
+    }
+    
+    // Store the setting
+    localStorage.setItem('ui.autoRefreshMs', String(intervalMs));
+    
+    // Set up new interval for refreshing stats and orders
+    window._autoRefreshTimer = setInterval(() => {
+      try {
+        loadStats();
+        loadOpenOrders();
+        loadHistoryOrders();
+        updateLastUpdated();
+      } catch (e) {
+        console.error('Auto refresh failed:', e);
+      }
+    }, intervalMs);
+    
+    console.log(`Auto refresh interval set to ${intervalMs}ms`);
+  } catch (e) {
+    console.error('Failed to apply auto refresh interval:', e);
   }
 }
 
