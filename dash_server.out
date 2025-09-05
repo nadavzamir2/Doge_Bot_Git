@@ -1,0 +1,16 @@
+* Serving Flask on http://127.0.0.1:8899/
+ * Serving Flask app 'dash_server'
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:8899
+[33mPress CTRL+C to quit[0m
+127.0.0.1 - - [06/Sep/2025 00:41:21] "GET /stream HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 00:41:24] "GET /api/stats HTTP/1.1" 200 -
+/Users/yuvalzamir/doge_bot/dash_server.py:560: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+  placement_iso = datetime.utcfromtimestamp(placement_ts/1000.0).isoformat()+"Z"
+/Users/yuvalzamir/doge_bot/dash_server.py:564: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+  exec_iso = datetime.utcfromtimestamp(exec_ts/1000.0).isoformat()+"Z"
+/Users/yuvalzamir/doge_bot/dash_server.py:468: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+  ts_iso = datetime.utcfromtimestamp(ts / 1000.0).isoformat() + "Z"
+127.0.0.1 - - [06/Sep/2025 00:41:25] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 00:41:25] "GET /api/order_history HTTP/1.1" 200 -

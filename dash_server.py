@@ -19,7 +19,8 @@ from datetime import datetime
 from collections import deque
 from typing import Optional
 import ccxt
-from flask import Flask, Response, jsonify, request, render_template_string, make_response
+from flask import Flask, Response, jsonify, request, render_template_string, make_response, send_file
+import subprocess, sys
 from dotenv import load_dotenv as _load_dotenv_for_reload
 from config import (
   API_KEY, API_SECRET, BASE_ORDER_USD, DATA_DIR, GRID_MAX, GRID_MIN, GRID_STEP_PCT,
@@ -767,6 +768,119 @@ def api_reload_keys():
   _maybe_reload_client()
   return {"ok": True, "has_keys": bool(API_KEY and API_SECRET), "region": BINANCE_REGION}
 
+
+def _is_request_allowed(req) -> bool:
+  """Allow only localhost or requests with correct admin token header/query param.
+
+  Set DASH_ADMIN_TOKEN in environment to allow remote requests via header `X-ADMIN-TOKEN`.
+  """
+  try:
+    addr = req.remote_addr
+    if addr in ("127.0.0.1", "::1", "localhost"):
+      return True
+    token = req.headers.get('X-ADMIN-TOKEN') or req.args.get('token')
+    if token and token == os.getenv('DASH_ADMIN_TOKEN'):
+      return True
+  except Exception:
+    pass
+  return False
+
+
+@app.post('/api/recompute_pnl')
+def api_recompute_pnl():
+  """Run the local recompute script and return summary + CSV rows.
+
+  Protected: only localhost or requests providing correct DASH_ADMIN_TOKEN.
+  """
+  if not _is_request_allowed(request):
+    return jsonify({'ok': False, 'error': 'forbidden'}), 403
+  try:
+    base = pathlib.Path(__file__).resolve().parent
+    script = base / 'scripts' / 'recompute_pnl.py'
+    if not script.exists():
+      return jsonify({'ok': False, 'error': 'recompute script missing', 'path': str(script)})
+    # Run script (short timeout)
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=30)
+    stdout = proc.stdout or ''
+    stderr = proc.stderr or ''
+    csv_path = base / 'data' / 'pnl_recompute_fifo.csv'
+    if not csv_path.exists():
+      return jsonify({'ok': False, 'error': 'csv missing after run', 'stdout': stdout, 'stderr': stderr})
+    # read CSV
+    import csv as _csv
+    rows = []
+    with csv_path.open('r', encoding='utf-8') as f:
+      for r in _csv.DictReader(f):
+        rows.append(r)
+    total_profit = sum(float(r.get('profit_usd') or 0) for r in rows)
+    # small summary
+    summary = {
+      'rows': len(rows),
+      'total_profit': round(total_profit, 8),
+      'csv_path': str(csv_path),
+      'stdout': stdout[:2000],
+      'stderr': stderr[:2000],
+    }
+    return jsonify({'ok': True, 'summary': summary, 'rows': rows})
+  except subprocess.TimeoutExpired:
+    return jsonify({'ok': False, 'error': 'script timeout'})
+  except Exception as e:
+    return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.get('/recompute_report')
+def recompute_report():
+  """Human-readable HTML report for the last recompute CSV.
+
+  Protected similar to the POST endpoint.
+  """
+  if not _is_request_allowed(request):
+    return make_response('forbidden', 403)
+  try:
+    base = pathlib.Path(__file__).resolve().parent
+    csv_path = base / 'data' / 'pnl_recompute_fifo.csv'
+    if not csv_path.exists():
+      return make_response('No recompute CSV found. Run POST /api/recompute_pnl first.', 404)
+    import csv as _csv
+    rows = []
+    with csv_path.open('r', encoding='utf-8') as fh:
+      for r in _csv.DictReader(fh):
+        rows.append(r)
+    total_profit = sum(float(r.get('profit_usd') or 0) for r in rows)
+    # Build a simple HTML table
+    html = ['<h2>Recompute P&L Report</h2>']
+    html.append(f'<p>Total rows: {len(rows)} — Total realized profit: {round(total_profit,8)} USD</p>')
+    # include download link
+    html.append(f'<p><a href="/api/pnl_csv" target="_blank">Download CSV</a></p>')
+    html.append('<table border="1" cellpadding="4" style="border-collapse:collapse;font-family:monospace">')
+    html.append('<tr><th>buy_id</th><th>buy_time</th><th>buy_price</th><th>chunk</th><th>sell_id</th><th>sell_time</th><th>sell_price</th><th>profit_usd</th></tr>')
+    for r in rows:
+      html.append('<tr>')
+      html.append('<td>%s</td>' % (r.get('buy_id') or ''))
+      html.append('<td>%s</td>' % (r.get('buy_time') or ''))
+      html.append('<td>%.8f</td>' % (float(r.get('buy_price') or 0)))
+      html.append('<td>%.8f</td>' % (float(r.get('buy_amount_chunk') or 0)))
+      html.append('<td>%s</td>' % (r.get('sell_id') or ''))
+      html.append('<td>%s</td>' % (r.get('sell_time') or ''))
+      html.append('<td>%.8f</td>' % (float(r.get('sell_price') or 0)))
+      html.append('<td>%.8f</td>' % (float(r.get('profit_usd') or 0)))
+      html.append('</tr>')
+    html.append('</table>')
+    return render_template_string('\n'.join(html))
+  except Exception as e:
+    return make_response(f'error: {e}', 500)
+
+
+@app.get('/api/pnl_csv')
+def api_pnl_csv():
+  if not _is_request_allowed(request):
+    return jsonify({'ok': False, 'error': 'forbidden'}), 403
+  base = pathlib.Path(__file__).resolve().parent
+  csv_path = base / 'data' / 'pnl_recompute_fifo.csv'
+  if not csv_path.exists():
+    return jsonify({'ok': False, 'error': 'missing_csv'}), 404
+  return send_file(str(csv_path), mimetype='text/csv', as_attachment=True, download_name='pnl_recompute_fifo.csv')
+
 @app.get("/api/diagnose_auth")
 def api_diagnose_auth():
   """Perform deeper auth diagnostics to help get real (non-fallback) data.
@@ -830,6 +944,34 @@ def api_stop_bot():
 def api_resume_bot():
     print("[API] resume bot requested")
     return {"ok": True}
+
+
+@app.get('/api/bot_status')
+def api_bot_status():
+  """Return whether the bot is running on this host.
+
+  Checks for a tmux session named 'doge' if tmux is available, else
+  checks for a running 'main.py' python process.
+  """
+  import shutil, subprocess
+  running = False
+  method = 'none'
+  try:
+    if shutil.which('tmux'):
+      res = subprocess.run(['tmux', 'has-session', '-t', 'doge'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+      if res.returncode == 0:
+        running = True
+        method = 'tmux'
+    if not running:
+      # Fallback: look for a running python main.py process
+      if shutil.which('pgrep'):
+        p = subprocess.run(['pgrep', '-f', 'main.py'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        if p.returncode == 0 and p.stdout.strip():
+          running = True
+          method = 'proc'
+  except Exception:
+    pass
+  return { 'running': bool(running), 'method': method }
 
 @app.post("/api/cancel_all_orders")
 def api_cancel_all_orders():
@@ -1008,6 +1150,13 @@ HTML = r"""<!doctype html>
   .auth-missing { background:#fffbea; border-color:#fbd38d; color:#975a16; }
   .auth-error { background:#ffecec; border-color:#feb2b2; color:#c53030; }
 </style>
+<style>
+/* Modal for recompute report */
+.recompute-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); align-items:center; justify-content:center; z-index:9999; }
+.recompute-modal .panel { background:#fff; padding:16px; border-radius:8px; width:90%; max-width:1100px; max-height:80vh; overflow:auto; box-shadow:0 6px 24px rgba(0,0,0,0.25); }
+.recompute-modal .panel .close { float:right; cursor:pointer; font-size:18px; padding:4px 8px; border-radius:4px; }
+.recompute-modal pre { white-space:pre-wrap; font-family:monospace; font-size:13px }
+</style>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
@@ -1017,12 +1166,13 @@ HTML = r"""<!doctype html>
       <div class="top-actions">
         <div class="toolbar-group">
           <button id="btnRefresh" class="icon-btn" title="Refresh all data (orders, history, stats)">🔄</button>
+          <button id="btnRecompute" class="icon-btn" title="Recompute realized P&L and generate report">📊</button>
           <label for="autoRefreshMs" class="small-label" title="Auto refresh interval (ms) for stats & tables">⏱</label>
           <input id="autoRefreshMs" type="number" min="5000" step="1000" value="25000" style="width:90px" title="Auto refresh interval in milliseconds">
           <button id="btnApplyInterval" class="icon-btn" title="Apply interval">✅</button>
           <button id="btnExportCSV" class="icon-btn" title="Download history as CSV">💾</button>
         </div>
-        <button id="btnStop" class="icon-btn" title="Stop the trading bot">⏹️</button>
+  <button id="btnStop" class="icon-btn" title="Stop the trading bot">⏹️</button>
         <button id="btnResume" class="icon-btn" title="Resume the trading bot">▶️</button>
         <button id="btnCancel" class="icon-btn" title="Cancel all open orders">❌</button>
   <button id="btnReloadKeys" class="icon-btn" title="Reload API keys from .env and refresh clients">🔐</button>
@@ -1060,11 +1210,11 @@ HTML = r"""<!doctype html>
 
   <div class="card" data-tooltip="Number of sell executions completed since session start / tracking reset"><h3>Sell Trades Count</h3><div id="sellTradesVal" class="v mono">—</div></div>
   <div class="card" data-tooltip="How many profit split transfers actually executed (successful conversions)"><h3>Actual Splits Count</h3><div id="actualSplitsVal" class="v mono">—</div></div>
-  <div class="card" data-tooltip="USD value of DOGE proceeds converted into BNB for fee optimization or bookkeeping"><h3>Converted to BNB (USD)</h3><div id="bnbVal" class="v mono">—</div></div>
     </div>
 
   <!-- EXTRA profit cards (values only; leave others untouched) -->
     <div class="cards">
+  <div class="card" data-tooltip="USD value of DOGE proceeds converted into BNB for fee optimization or bookkeeping"><h3>Converted to BNB (USD)</h3><div id="bnbVal" class="v mono">—</div></div>
   <div class="card" data-tooltip="Profit locked in from closed trades (excludes open position PnL)"><h3>Realized Profit (USD)</h3><div id="profitRealizedVal" class="v mono">—</div></div>
   <div class="card" data-tooltip="Mark-to-market profit on current inventory relative to initial cost basis"><h3>Unrealized Profit (USD)</h3><div id="profitUnrealizedVal" class="v mono">—</div></div>
   <div class="card" data-tooltip="Cumulative profit generated by grid fills alone (excluding conversions/splits)"><h3>Grid Profit (USD)</h3><div id="profitGridVal" class="v mono">—</div></div>
@@ -1247,6 +1397,14 @@ HTML = r"""<!doctype html>
       </details>
     </div>
   </div>
+
+    <!-- Modal for recompute report -->
+    <div id="recomputeModal" class="recompute-modal">
+      <div class="panel">
+        <button id="recomputeClose" class="close">✖</button>
+        <div id="recomputeContent">Loading...</div>
+      </div>
+    </div>
 
 <script>
 "use strict";
@@ -1792,64 +1950,66 @@ async function updateChart() {
         yTicksVals.push(GRID_MAX);
     }
 
-    if (mode === 'latitudes') {
-      if (isBoundary) return ''; // suppress tick text for boundary; annotation-only pill will be shown
-        if (GRID_MIN != null && GRID_MAX != null && GRID_MAX > GRID_MIN) {
-      if (isBoundary) return ''; // suppress tick text for boundary; annotation-only pill will be shown
-            for (let i = 1; i <= numLines; i++) {
-                const y = GRID_MIN + i * step;
-                shapes.push(shapeForY(y, '#cccccc', 1, 'solid'));
-                yTicksVals.push(y);
-            }
+  if (mode === 'latitudes') {
+    // Show evenly spaced light-gray latitude lines across the configured grid range.
+    if (GRID_MIN != null && GRID_MAX != null && GRID_MAX > GRID_MIN) {
+      const LAT_COUNT = 10; // number of intervals -> LAT_COUNT-1 intermediate lines
+      const span = GRID_MAX - GRID_MIN;
+      for (let i = 1; i < LAT_COUNT; i++) {
+        const y = GRID_MIN + (span * i / LAT_COUNT);
+        // Skip exact boundaries (they are added earlier)
+        if (Math.abs(y - GRID_MIN) < 1e-12 || Math.abs(y - GRID_MAX) < 1e-12) continue;
+        shapes.push(shapeForY(y, 'rgba(200,200,200,0.9)', 1, 'solid'));
+        yTicksVals.push(y);
+      }
+    } else {
+      // Fallback: reuse grid levels if available
+      try {
+        const allLevels = buildAllLevels();
+        for (const y of allLevels) {
+          if (y === GRID_MIN || y === GRID_MAX) continue;
+          shapes.push(shapeForY(y, 'rgba(200,200,200,0.9)', 1, 'solid'));
+          yTicksVals.push(y);
         }
-        
-      if (isBoundary) return ''; // suppress tick text for boundary; annotation-only pill will be shown
-        const activeOrderPrices = new Set(OPEN_ORDERS_RAW.map(o => o.price));
-        
-        // Add dashed line markings for active purple lines
-        if (GRID_MIN != null && activeOrderPrices.has(GRID_MIN)) {
-            // Add dashed lines at top and bottom edges of purple line
-    // Build boundary annotation-only pills so they render crisply and are the
-    // sole visible label for the grid boundaries (we suppressed tick text above).
-    const anns = [];
-    try {
-      const addBadge = (yVal, label) => {
-        anns.push({ xref: 'paper', x: -0.02, xanchor: 'right', y: yVal, yanchor: 'middle', text: `<span style="border:1px solid #8B5CF6; background:#EDE9FE; border-radius:9999px; padding:2px 6px; color:#5B21B6; font-weight:700; font-size:0.95em;">${label}</span>`, showarrow: false, align: 'right' });
-      };
-      if (GRID_MIN != null && yTicksVals.some(v=>Math.abs(v-GRID_MIN) <= (Math.abs(GRID_MIN)*1e-9 + 1e-12))) addBadge(GRID_MIN, fmt(GRID_MIN,6));
-      if (GRID_MAX != null && yTicksVals.some(v=>Math.abs(v-GRID_MAX) <= (Math.abs(GRID_MAX)*1e-9 + 1e-12))) addBadge(GRID_MAX, fmt(GRID_MAX,6));
-    } catch(e){/* noop */}
-
-    // Apply layout updates including annotations (annotation-only badges for boundaries)
-    Plotly.relayout('chart', {
-      shapes: shapes,
-      'yaxis.tickmode': 'array',
-      'yaxis.tickvals': yTicksVals,
-      'yaxis.ticktext': yTicksText,
-      'yaxis.range': yRange,
-      annotations: anns,
-    });
-            shapes.push(shapeForY(GRID_MIN + offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
-            shapes.push(shapeForY(GRID_MIN - offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
-        }
-        
-        if (GRID_MAX != null && activeOrderPrices.has(GRID_MAX)) {
-            // Add dashed lines at top and bottom edges of purple line
-            const offset = (GRID_MAX - GRID_MIN) * 0.001; // Small offset for visibility
-            shapes.push(shapeForY(GRID_MAX + offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
-            shapes.push(shapeForY(GRID_MAX - offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
-        }
-    } else if (mode === 'active') {
-        const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).sort((a, b) => a - b);
+      } catch (e) {
+        // ignore if buildAllLevels unavailable
+      }
+    }
+  } else if (mode === 'active') {
+        // Active mode: show active order prices but also include full grid levels
+        // as faint background context. Build union of grid levels + active prices
+        // for the y-axis ticks so both modes present consistent tick sets.
+        const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).filter(p=>isFinite(p)).sort((a, b) => a - b);
         const { below, above } = nearestBracket(activeOrders, currentPrice);
 
-        for (const p of activeOrders) {
+        // Add faint grid-level shapes for context (skip exact boundaries and
+        // skip any level that is an active order to avoid duplicate shapes)
+        try {
+          const allLevels = buildAllLevels();
+          for (const y of allLevels) {
+            if (y === GRID_MIN || y === GRID_MAX) continue;
+            const dup = activeOrders.some(a => Math.abs(a - y) <= (Math.abs(y) * 1e-12 + 1e-12));
+            if (dup) continue;
+            shapes.push(shapeForY(y, 'rgba(200,200,200,0.25)', 1, 'dash'));
+          }
+          // Add active-order shapes and collect their ticks
+          for (const p of activeOrders) {
             const isNearest = (p === below || p === above);
             const color = isNearest ? 'rgba(255, 165, 0, 0.9)' : 'rgba(255, 165, 0, 0.4)';
             const width = isNearest ? 2.5 : 1.5;
             const dash = isNearest ? 'longdash' : 'dash';
             shapes.push(shapeForY(p, color, width, dash));
             yTicksVals.push(p);
+          }
+          // Union grid levels + active prices into tick set
+          const unionSet = new Set([...(buildAllLevels() || []), ...yTicksVals]);
+          yTicksVals = Array.from(unionSet).sort((a, b) => a - b);
+        } catch (e) {
+          // Fallback to showing only active orders if grid build fails
+          for (const p of activeOrders) {
+            shapes.push(shapeForY(p, 'rgba(255, 165, 0, 0.6)', 1.5, 'dash'));
+            yTicksVals.push(p);
+          }
         }
     } else { // 'grid' mode is the default
         const allLevels = buildAllLevels();
@@ -2690,9 +2850,115 @@ function wireControls(){
   setupChartControls();
 
   const refreshBtn = document.getElementById('btnRefresh');
+  const recomputeBtn = document.getElementById('btnRecompute');
   if(refreshBtn) refreshBtn.addEventListener('click', ()=>{
     loadStats(); loadOpenOrders(); loadHistoryOrders(); loadHistory(); updateLastUpdated();
   });
+  // Topbar action buttons: stop/resume/cancel/reload keys
+  const stopBtn = document.getElementById('btnStop');
+  if (stopBtn) stopBtn.addEventListener('click', async () => {
+    try{
+      const r = await fetch('/api/stop_bot', { method: 'POST' });
+      const j = await r.json().catch(()=>null);
+      console.log('stop_bot ->', j);
+  // Refresh bot status after stop
+  try{ await updateBotStatus(); }catch(_){ }
+    }catch(e){ console.warn('stop request failed', e); }
+  });
+  const resumeBtn = document.getElementById('btnResume');
+  if (resumeBtn) resumeBtn.addEventListener('click', async () => {
+    try{
+      const r = await fetch('/api/resume_bot', { method: 'POST' });
+      const j = await r.json().catch(()=>null);
+      console.log('resume_bot ->', j);
+  // Refresh bot status after resume
+  try{ await updateBotStatus(); }catch(_){ }
+    }catch(e){ console.warn('resume request failed', e); }
+  });
+  const cancelBtn = document.getElementById('btnCancel');
+  if (cancelBtn) cancelBtn.addEventListener('click', async () => {
+    // Show confirmation with expected money/profit details
+    try{
+      const count = Array.isArray(OPEN_ORDERS_RAW) ? OPEN_ORDERS_RAW.length : 0;
+      const totalValue = (Array.isArray(OPEN_ORDERS_RAW) ? OPEN_ORDERS_RAW.reduce((s,o)=>s + (Number(o.value_usdt) || 0), 0) : 0);
+      let profit = 0;
+      const profitEl = document.getElementById('profitVal');
+      if (profitEl) {
+        // remove any non-numeric chars (commas, $) then parse
+        const cleaned = (profitEl.textContent || '').replace(/[^0-9.\-]/g,'');
+        profit = parseFloat(cleaned) || 0;
+      }
+      const msg = `Cancel all open orders (${count})?\nEstimated open orders value: $${totalValue.toFixed(2)}\nCurrent Total Profit: $${profit.toFixed(2)}\n\nThis will send cancel requests for all open orders. Continue?`;
+      if (!confirm(msg)) return;
+
+      cancelBtn.disabled = true;
+      const r = await fetch('/api/cancel_all_orders', { method: 'POST' });
+      const j = await r.json().catch(()=>null);
+      console.log('cancel_all_orders ->', j);
+      // Refresh open orders after cancel attempt
+      setTimeout(()=>{ loadOpenOrders(); }, 800);
+    }catch(e){ console.warn('cancel request failed', e); }
+    finally { try{ cancelBtn.disabled = false; }catch(_){}};
+  });
+  const reloadKeysBtn = document.getElementById('btnReloadKeys');
+
+  if (recomputeBtn) {
+    recomputeBtn.addEventListener('click', async () => {
+      if (!confirm('Run recompute P&L now? This will read state files and regenerate the CSV.')) return;
+      recomputeBtn.disabled = true;
+      try {
+        const token = localStorage.getItem('DASH_ADMIN_TOKEN') || '';
+        const resp = await fetch('/api/recompute_pnl', {method: 'POST', headers: token ? {'X-ADMIN-TOKEN': token} : {}});
+        const j = await resp.json();
+        if (!j.ok) {
+          alert('Recompute failed: ' + (j.error || JSON.stringify(j)));
+          return;
+        }
+        // fetch HTML report and show in modal
+        const reportResp = await fetch('/recompute_report', {headers: token ? {'X-ADMIN-TOKEN': token} : {}});
+        if (!reportResp.ok) {
+          alert('Failed to load report: ' + reportResp.statusText);
+          return;
+        }
+        const html = await reportResp.text();
+        const modal = document.getElementById('recomputeModal');
+        const content = document.getElementById('recomputeContent');
+        content.innerHTML = html;
+        modal.style.display = 'flex';
+        // wire close
+        const closeBtn = document.getElementById('recomputeClose');
+        const hide = () => { modal.style.display = 'none'; };
+        closeBtn.onclick = hide;
+        modal.onclick = (ev) => { if (ev.target === modal) hide(); };
+      } catch (e) {
+        alert('Recompute request failed: ' + e);
+      } finally {
+        recomputeBtn.disabled = false;
+      }
+    });
+  }
+  if (reloadKeysBtn) reloadKeysBtn.addEventListener('click', async () => {
+    try{
+      const r = await fetch('/api/reload_keys', { method: 'POST' });
+      const j = await r.json().catch(()=>null);
+      console.log('reload_keys ->', j);
+      // Refresh auth status badge and open orders
+      refreshAuthStatus(); loadOpenOrders();
+      try{ await updateBotStatus(); }catch(_){ }
+    }catch(e){ console.warn('reload keys request failed', e); }
+  });
+
+  // Query /api/bot_status and update Stop/Resume button states
+  async function updateBotStatus(){
+    try{
+      const r = await fetch('/api/bot_status');
+      const j = await r.json();
+      const running = !!(j && j.running);
+      if (stopBtn) stopBtn.disabled = !running; // disable Stop if not running
+      if (resumeBtn) resumeBtn.disabled = running; // disable Resume if already running
+      return j;
+    }catch(e){ console.warn('bot status check failed', e); return {running:false}; }
+  }
   const olderBtn = document.getElementById('btnHistOlder');
   if(olderBtn) olderBtn.addEventListener('click', ()=>{ fetchOlderHistory(); });
   const applyIntBtn = document.getElementById('btnApplyInterval');
