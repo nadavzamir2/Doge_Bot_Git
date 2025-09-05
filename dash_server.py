@@ -970,7 +970,7 @@ HTML = r"""<!doctype html>
   .sections { display:grid; gap:12px; }
   details { background:var(--card); border:1px solid var(--grid); border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
   details > summary { cursor:pointer; padding:12px 14px; font-weight:600; list-style:none; display:flex; align-items:center; gap:8px; user-select:none; }
-  details > summary::before { content: '▸'; font-size:12px; color:var(--muted); transition: transform .15s ease; }
+  details > summary::before { content: '▸'; font-size:20px; font-weight: bold; color:var(--muted); transition: transform .15s ease; }
   details[open] > summary::before { transform: rotate(90deg); }
   .section-body { padding:12px 14px; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -1083,6 +1083,26 @@ HTML = r"""<!doctype html>
             .ctrl-marker span { font-family: 'Courier New', monospace; font-weight:500; letter-spacing:0.3px; font-size:11px; color:#ff5c99; opacity:0.85; }
             .control-row .spacer { flex:1 1 auto; }
           </style>
+          <!-- Color Legend - Relocated to bottom with feature flag -->
+          <div id="chartLegend" style="margin-bottom: 12px; padding: 8px; background: #f8f9fa; border-radius: 6px; font-size: 12px;">
+            <strong>Chart Legend:</strong>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(46, 204, 113, 0.6); margin-right: 4px;"></span>
+              <span style="color: #2c7a7b;">Buy Orders</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(243, 156, 18, 0.6); margin-right: 4px;"></span>
+              <span style="color: #c53030;">Sell Orders</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(139, 92, 246, 0.8); margin-right: 4px;"></span>
+              <span style="color: #8b5cf6;">Grid Boundaries</span>
+            </span>
+            <span style="margin-left: 12px;">
+              <span style="display: inline-block; width: 12px; height: 1px; background: #cccccc; margin-right: 4px;"></span>
+              <span style="color: #666;">Gray Latitudes</span>
+            </span>
+          </div>
           <div class="control-row">
             <label style="display:flex;align-items:center;gap:6px;user-select:none">
               <input id="showGrid" type="checkbox" checked/>
@@ -1116,26 +1136,6 @@ HTML = r"""<!doctype html>
           </div>
           <div id="chartScroll" class="chart-container" style="max-height:520px; overflow-y:auto; border:1px solid #eee; border-radius:4px;">
             <div id="chart" style="height:520px;"></div>
-          </div>
-          <!-- Color Legend - Relocated to bottom with feature flag -->
-          <div id="chartLegend" style="margin-top: 12px; padding: 8px; background: #f8f9fa; border-radius: 6px; font-size: 12px; display: none;">
-            <strong>Chart Legend:</strong>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(46, 204, 113, 0.6); margin-right: 4px;"></span>
-              <span style="color: #2c7a7b;">Buy Orders</span>
-            </span>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(243, 156, 18, 0.6); margin-right: 4px;"></span>
-              <span style="color: #c53030;">Sell Orders</span>
-            </span>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 2px; background: rgba(139, 92, 246, 0.8); margin-right: 4px;"></span>
-              <span style="color: #8b5cf6;">Grid Boundaries</span>
-            </span>
-            <span style="margin-left: 12px;">
-              <span style="display: inline-block; width: 12px; height: 1px; background: #cccccc; margin-right: 4px;"></span>
-              <span style="color: #666;">Gray Latitudes</span>
-            </span>
           </div>
         </div>
       </details>
@@ -1793,9 +1793,9 @@ async function updateChart() {
     }
 
     if (mode === 'latitudes') {
-        const numLines = 10; // Fixed number of intervals
+      if (isBoundary) return ''; // suppress tick text for boundary; annotation-only pill will be shown
         if (GRID_MIN != null && GRID_MAX != null && GRID_MAX > GRID_MIN) {
-            const step = (GRID_MAX - GRID_MIN) / (numLines + 1);
+      if (isBoundary) return ''; // suppress tick text for boundary; annotation-only pill will be shown
             for (let i = 1; i <= numLines; i++) {
                 const y = GRID_MIN + i * step;
                 shapes.push(shapeForY(y, '#cccccc', 1, 'solid'));
@@ -1803,13 +1803,32 @@ async function updateChart() {
             }
         }
         
-        // Check if purple boundary lines represent active layers and mark them with dashed lines
+      if (isBoundary) return ''; // suppress tick text for boundary; annotation-only pill will be shown
         const activeOrderPrices = new Set(OPEN_ORDERS_RAW.map(o => o.price));
         
         // Add dashed line markings for active purple lines
         if (GRID_MIN != null && activeOrderPrices.has(GRID_MIN)) {
             // Add dashed lines at top and bottom edges of purple line
-            const offset = (GRID_MAX - GRID_MIN) * 0.001; // Small offset for visibility
+    // Build boundary annotation-only pills so they render crisply and are the
+    // sole visible label for the grid boundaries (we suppressed tick text above).
+    const anns = [];
+    try {
+      const addBadge = (yVal, label) => {
+        anns.push({ xref: 'paper', x: -0.02, xanchor: 'right', y: yVal, yanchor: 'middle', text: `<span style="border:1px solid #8B5CF6; background:#EDE9FE; border-radius:9999px; padding:2px 6px; color:#5B21B6; font-weight:700; font-size:0.95em;">${label}</span>`, showarrow: false, align: 'right' });
+      };
+      if (GRID_MIN != null && yTicksVals.some(v=>Math.abs(v-GRID_MIN) <= (Math.abs(GRID_MIN)*1e-9 + 1e-12))) addBadge(GRID_MIN, fmt(GRID_MIN,6));
+      if (GRID_MAX != null && yTicksVals.some(v=>Math.abs(v-GRID_MAX) <= (Math.abs(GRID_MAX)*1e-9 + 1e-12))) addBadge(GRID_MAX, fmt(GRID_MAX,6));
+    } catch(e){/* noop */}
+
+    // Apply layout updates including annotations (annotation-only badges for boundaries)
+    Plotly.relayout('chart', {
+      shapes: shapes,
+      'yaxis.tickmode': 'array',
+      'yaxis.tickvals': yTicksVals,
+      'yaxis.ticktext': yTicksText,
+      'yaxis.range': yRange,
+      annotations: anns,
+    });
             shapes.push(shapeForY(GRID_MIN + offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
             shapes.push(shapeForY(GRID_MIN - offset, 'rgba(139, 92, 246, 0.8)', 2, 'dash'));
         }
@@ -1845,11 +1864,8 @@ async function updateChart() {
 
   // Add dynamic current price horizontal reference line (always on top)
   if (isFinite(currentPrice)) {
-    // Feature flag for always visible price marker (backwards compatible)
-    const alwaysShowPrice = (localStorage.getItem('alwaysShowPriceMarker') !== '0');
     const priceLineEnabled = (localStorage.getItem('showPriceLine') !== '0');
-    const enabled = alwaysShowPrice || priceLineEnabled;
-    if (enabled) {
+    if (priceLineEnabled) {
       // Distinct vivid color & slightly thicker for visibility
       shapes.push(shapeForY(currentPrice, 'rgba(255, 0, 102, 0.9)', 2.5, 'solid'));
       yTicksVals.push(currentPrice);
@@ -1860,8 +1876,8 @@ async function updateChart() {
   let yTicksText = [];
 
   // Persistent tracking: once price touches a purple boundary, keep showing 4 gray latitude lines on that side
-    (function handleBoundaryTouch(){
-      if (GRID_MIN == null || GRID_MAX == null) return;
+  const extraLinesInfo = (function handleBoundaryTouch(){
+      if (GRID_MIN == null || GRID_MAX == null) return { minLines: 0, maxLines: 0 };
       if (!window._boundaryTouch) {
     window._boundaryTouch = { lastMin: GRID_MIN, lastMax: GRID_MAX, minTouched: false, maxTouched: false, lastPrice: null, minExtremePrice: null, maxExtremePrice: null };
       }
@@ -1915,7 +1931,7 @@ async function updateChart() {
           const extraNeeded = Math.ceil((GRID_MIN - currentPrice)/spacing) + 4; // distance to price + 4 more
           if (extraNeeded > minCount) minCount = extraNeeded;
         }
-  const includeTick = (i)=> _followMode ? true : (i <= 2); // in follow mode show all ticks
+  const includeTick = (i)=> _followMode ? (i % 4 === 1) : (i <= 2); // in follow mode, show every 4th tick
         for (let i = 1; i <= minCount; i++) {
           const y = GRID_MIN - spacing * i;
           const maxIdx = minCount;
@@ -1938,7 +1954,7 @@ async function updateChart() {
           const extraNeededTop = Math.ceil((currentPrice - GRID_MAX)/spacing) + 4;
           if (extraNeededTop > maxCount) maxCount = extraNeededTop;
         }
-  const includeTickTop = (i)=> _followModeTop ? true : (i <= 2); // in follow mode show all ticks
+  const includeTickTop = (i)=> _followModeTop ? (i % 4 === 1) : (i <= 2); // in follow mode, show every 4th tick
         for (let i = 1; i <= maxCount; i++) {
           const y = GRID_MAX + spacing * i;
           const maxIdx = maxCount;
@@ -1947,25 +1963,74 @@ async function updateChart() {
           if (includeTickTop(i)) yTicksVals.push(y);
         }
       }
+      return { minLines: minCount, maxLines: maxCount };
     })();
 
   // Finalize ticks AFTER adding any gray boundary-extension lines
   yTicksVals = [...new Set(yTicksVals)].sort((a, b) => a - b);
+
+  // When showing price line, remove other ticks that are too close to avoid overlap
+  const priceLineEnabledForCulling = (localStorage.getItem('showPriceLine') !== '0');
+  if (priceLineEnabledForCulling && isFinite(currentPrice)) {
+    const priceSpan = (GRID_MAX != null && GRID_MIN != null && GRID_MAX > GRID_MIN) ? (GRID_MAX - GRID_MIN) : (currentPrice * 0.02);
+    const cullRange = priceSpan * 0.01; // 1.0% of span is the exclusion zone
+
+    const priceTickVal = yTicksVals.find(v => Math.abs(v - currentPrice) <= (currentPrice * 1e-9 + 1e-12));
+
+    if (priceTickVal !== undefined) {
+      yTicksVals = yTicksVals.filter(v => {
+        if (v === priceTickVal) return true; // Always keep the price tick itself
+        return Math.abs(v - priceTickVal) > cullRange; // Remove ticks that are too close
+      });
+    }
+  }
+
+  // General tick culling to prevent overlap for all other ticks
+  if (yTicksVals.length > 20) { // Only apply if there are many ticks
+    const priceSpan = (GRID_MAX != null && GRID_MIN != null && GRID_MAX > GRID_MIN) ? (GRID_MAX - GRID_MIN) : (currentPrice * 0.02);
+    const minSeparation = priceSpan * 0.012; // Minimum separation of 1.2% of the span
+
+    const culledTicks = [];
+    if (yTicksVals.length > 0) {
+      culledTicks.push(yTicksVals[0]);
+      let lastTick = yTicksVals[0];
+      for (let i = 1; i < yTicksVals.length - 1; i++) {
+        const currentTick = yTicksVals[i];
+        if (Math.abs(currentTick - lastTick) > minSeparation) {
+          culledTicks.push(currentTick);
+          lastTick = currentTick;
+        }
+      }
+      // Always include the last tick, ensuring it's not overlapping the previously added one
+      const lastOriginalTick = yTicksVals[yTicksVals.length - 1];
+      if (culledTicks[culledTicks.length - 1] !== lastOriginalTick && Math.abs(lastOriginalTick - culledTicks[culledTicks.length - 1]) > minSeparation) {
+        culledTicks.push(lastOriginalTick);
+      }
+    }
+    yTicksVals = culledTicks;
+  }
+
   if (mode === 'active') {
     const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).sort((a, b) => a - b);
     const { below, above } = nearestBracket(activeOrders, currentPrice);
     yTicksText = yTicksVals.map(v => {
+      const isBoundary = (GRID_MIN != null && v === GRID_MIN) || (GRID_MAX != null && v === GRID_MAX);
+      if (isBoundary) return `<b style="color:#5B21B6">${fmt(v,6)}</b>`;
       const isNearest = (v === below || v === above);
       const isPrice = (isFinite(currentPrice) && Math.abs(v - currentPrice) <= (currentPrice * 1e-9 + 1e-12));
+      const priceLineEnabled = (localStorage.getItem('showPriceLine') !== '0');
+      if (isPrice && priceLineEnabled) return `<b style="color: red;">${fmt(v,6)}</b>`;
       if (isNearest) return `<b style="color: black">${fmt(v, 6)}</b>`;
-      if (isPrice) return `<b style="color:#ff0066">${fmt(v,6)}</b>`;
       return fmt(v, 6);
     });
   } else {
     // grid or latitudes modes just show formatted numbers
     yTicksText = yTicksVals.map(v => {
+      const isBoundary = (GRID_MIN != null && v === GRID_MIN) || (GRID_MAX != null && v === GRID_MAX);
+      if (isBoundary) return `<b style="color:#5B21B6">${fmt(v,6)}</b>`;
       const isPrice = (isFinite(currentPrice) && Math.abs(v - currentPrice) <= (currentPrice * 1e-9 + 1e-12));
-      if (isPrice) return `<b style="color:#ff0066">${fmt(v,6)}</b>`;
+      const priceLineEnabled = (localStorage.getItem('showPriceLine') !== '0');
+      if (isPrice && priceLineEnabled) return `<b style="color: red;">${fmt(v,6)}</b>`;
       return fmt(v, 6);
     });
   }
@@ -2051,11 +2116,17 @@ async function updateChart() {
       latVals.sort((a,b)=>a-b);
       yTicksVals = latVals;
       yTicksText = latVals.map(v=>{
+        const isBoundary = (GRID_MIN != null && v === GRID_MIN) || (GRID_MAX != null && v === GRID_MAX);
         const isPrice = isFinite(currentPrice) && Math.abs(v-currentPrice) <= (Math.abs(currentPrice)*1e-9 + 1e-12);
-        return isPrice ? `<b style="color:#ff0066">${fmt(v,6)}</b>` : fmt(v,6);
+        const priceLineEnabled = (localStorage.getItem('showPriceLine') !== '0');
+        if (isBoundary) return `<b style="color:#5B21B6">${fmt(v,6)}</b>`;
+        if (isPrice && priceLineEnabled) return `<b style="color: red;">${fmt(v,6)}</b>`;
+        return fmt(v,6);
       });
     }
   }
+  // Apply layout updates (shapes and tick arrays). Keep annotations out so
+  // only the y-axis tick text is shown for boundary lines (prevents duplicate labels).
   Plotly.relayout('chart', {
     shapes: shapes,
     'yaxis.tickmode': 'array',
@@ -2070,22 +2141,8 @@ async function updateChart() {
   if (scrollWrap) {
     try {
       const baseHeight = 520; // px
-      // Count gray extension lines (approx difference beyond boundaries)
-      let extraLines = 0;
-      if (window._boundaryTouch) {
-        const bt = window._boundaryTouch;
-        if (bt.minExtremePrice != null && GRID_MIN != null) {
-          const span = (GRID_MAX - GRID_MIN) || 1;
-          const spacing = span * 0.01;
-          extraLines += Math.max(0, Math.ceil((GRID_MIN - bt.minExtremePrice)/spacing));
-        }
-        if (bt.maxExtremePrice != null && GRID_MAX != null) {
-          const span = (GRID_MAX - GRID_MIN) || 1;
-          const spacing = span * 0.01;
-          extraLines += Math.max(0, Math.ceil((bt.maxExtremePrice - GRID_MAX)/spacing));
-        }
-      }
-      const added = Math.min(2000, extraLines * 8); // 8px per extra line (capped)
+      const extraLines = (extraLinesInfo.minLines || 0) + (extraLinesInfo.maxLines || 0);
+      const added = Math.min(2000, extraLines * 20); // 20px per extra line (capped)
       const newHeight = baseHeight + added;
       const chartDiv = document.getElementById('chart');
       if (chartDiv && chartDiv.style.height !== newHeight + 'px') {
@@ -2110,7 +2167,12 @@ function setChartMode(mode) {
 function setupChartControls() {
   showGridEl.addEventListener('change', () => { if(showGridEl.checked) setChartMode('grid'); });
   showActiveEl.addEventListener('change', () => { if(showActiveEl.checked) setChartMode('active'); });
-  showLatEl.addEventListener('change', () => { if(showLatEl.checked) setChartMode('latitudes'); });
+  // Persist and toggle latitudes mode: when checked -> latitudes, when unchecked -> grid
+  try{ const savedL = localStorage.getItem('ui.showLat'); if(savedL!==null) showLatEl.checked = JSON.parse(savedL)?true:false; }catch(_){ }
+  showLatEl.addEventListener('change', () => {
+    try{ localStorage.setItem('ui.showLat', JSON.stringify(showLatEl.checked)); }catch(_){ }
+    if (showLatEl.checked) setChartMode('latitudes'); else setChartMode('grid');
+  });
   if (showPriceLineEl){
     showPriceLineEl.checked = (localStorage.getItem('showPriceLine') !== '0');
     showPriceLineEl.addEventListener('change', () => {
