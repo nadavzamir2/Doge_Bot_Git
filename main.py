@@ -94,6 +94,7 @@ def log_startup_info():
     """Log startup information and configuration summary."""
     config_summary = get_config_summary()
     
+    log.info("היי! ברוכים הבאים לבוט הדוגקוין - Hi! Welcome to the DOGE Bot")
     log.info("Starting DOGE Grid Trading Bot")
     log.info("Mode: %s", config_summary["mode"])
     log.info("Environment: %s", config_summary["env_path"])

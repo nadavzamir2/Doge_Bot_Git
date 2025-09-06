@@ -1185,6 +1185,12 @@ HTML = r"""<!doctype html>
       </div>
     </div>
 
+    <!-- Welcome greeting -->
+    <div style="margin: 16px 0; padding: 12px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 12px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+      <span style="font-size: 18px; font-weight: 600;">היי! ברוכים הבאים לבוט הדוגקוין</span>
+      <div style="font-size: 14px; margin-top: 4px; opacity: 0.9;">Hi! Welcome to the DOGE Bot</div>
+    </div>
+
     <!-- Top info cards -->
     <div class="cards">
       <!-- New info boxes for initial investments -->
