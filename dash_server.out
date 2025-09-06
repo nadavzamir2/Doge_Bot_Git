@@ -4,13 +4,99 @@
 [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
  * Running on http://127.0.0.1:8899
 [33mPress CTRL+C to quit[0m
-127.0.0.1 - - [06/Sep/2025 00:41:21] "GET /stream HTTP/1.1" 200 -
-127.0.0.1 - - [06/Sep/2025 00:41:24] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:00] "GET /stream HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:21] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:22] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:22] "GET /api/initial_investments HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:22] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [06/Sep/2025 13:32:22] "GET /history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:22] "GET /stream HTTP/1.1" 200 -
+/Users/yuvalzamir/doge_bot/dash_server.py:468: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+  ts_iso = datetime.utcfromtimestamp(ts / 1000.0).isoformat() + "Z"
+127.0.0.1 - - [06/Sep/2025 13:32:22] "GET /api/open_orders HTTP/1.1" 200 -
 /Users/yuvalzamir/doge_bot/dash_server.py:560: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
   placement_iso = datetime.utcfromtimestamp(placement_ts/1000.0).isoformat()+"Z"
 /Users/yuvalzamir/doge_bot/dash_server.py:564: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
   exec_iso = datetime.utcfromtimestamp(exec_ts/1000.0).isoformat()+"Z"
-/Users/yuvalzamir/doge_bot/dash_server.py:468: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
-  ts_iso = datetime.utcfromtimestamp(ts / 1000.0).isoformat() + "Z"
-127.0.0.1 - - [06/Sep/2025 00:41:25] "GET /api/open_orders HTTP/1.1" 200 -
-127.0.0.1 - - [06/Sep/2025 00:41:25] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:23] "GET /api/order_history?full=1 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:23] "GET /api/auth_status HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:26] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:26] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:32:27] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:33:26] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:33:27] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:33:27] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:34:26] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:34:26] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:34:27] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:35:26] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:35:26] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:35:27] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:36:26] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:36:26] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:36:27] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:26] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:26] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:27] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:50] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:50] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:51] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:54] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:54] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:54] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [06/Sep/2025 13:37:54] "GET /api/initial_investments HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:54] "GET /history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:54] "GET /stream HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:55] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:55] "GET /api/order_history?full=1 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:37:56] "GET /api/auth_status HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:25] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:26] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:26] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:31] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:31] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:31] "GET /api/initial_investments HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:31] "GET /history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:31] "GET /stream HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:31] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:32] "GET /api/order_history?full=1 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:32] "GET /api/auth_status HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:35] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:36] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:36] "GET /api/initial_investments HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:36] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [06/Sep/2025 13:38:36] "GET /history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:36] "GET /stream HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:36] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:37] "GET /api/order_history?full=1 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:38:37] "GET /api/auth_status HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:39:02] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:39:02] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:39:03] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:39:32] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:39:33] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:39:33] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:02] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:02] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:03] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:32] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:32] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:33] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:53] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:54] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:54] "GET /api/initial_investments HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:54] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [06/Sep/2025 13:40:54] "GET /history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:54] "GET /stream HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:55] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:55] "GET /api/order_history?full=1 HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:40:56] "GET /api/auth_status HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:41:02] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:41:02] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:41:03] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:41:32] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:41:32] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:41:33] "GET /api/order_history HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:42:02] "GET /api/stats HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:42:02] "GET /api/open_orders HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 13:42:03] "GET /api/order_history HTTP/1.1" 200 -

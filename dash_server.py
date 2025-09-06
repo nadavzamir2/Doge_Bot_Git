@@ -1097,10 +1097,16 @@ HTML = r"""<!doctype html>
     position: relative;
   }
   
-  .chart-container.sticky-mode .plotly .xaxis {
+  /* Make Plotly's x-axis layers sticky so axis labels remain visible when scrolling */
+  .chart-container.sticky-mode .plotly .xaxislayer-above,
+  .chart-container.sticky-mode .plotly .xaxislayer-below,
+  .chart-container.sticky-mode .plotly .xaxis,
+  .chart-container.sticky-mode .plotly .xtick {
     position: sticky;
     bottom: 0;
-    z-index: 10;
+    z-index: 20;
+    background: white; /* keep labels readable against plot */
+    transform: translateZ(0);
   }
   
   @keyframes spin {
@@ -1262,6 +1268,7 @@ HTML = r"""<!doctype html>
               <input id="showActiveLayers" type="checkbox"/>
               <span>Show active layers</span>
             </label>
+            <!-- activeEmphasis UI removed; active levels are emphasized at the default intensity -->
             <label style="display:flex;align-items:center;gap:6px;user-select:none">
               <input id="showLat" type="checkbox" checked/>
               <span>Show gray latitudes</span>
@@ -1278,10 +1285,7 @@ HTML = r"""<!doctype html>
               <input id="autoZoom" type="checkbox"/>
               <span>Auto zoom</span>
             </label>
-            <label style="display:flex;align-items:center;gap:6px;user-select:none">
-              <input id="stickyXAxis" type="checkbox"/>
-              <span>Sticky X-axis</span>
-            </label>
+            <!-- Sticky X-axis control removed; axis will auto-stick when chart is scrollable -->
             <!-- legend toggle removed (always show price curve) -->
           </div>
           <div id="chartScroll" class="chart-container" style="max-height:520px; overflow-y:auto; border:1px solid #eee; border-radius:4px;">
@@ -1409,7 +1413,7 @@ HTML = r"""<!doctype html>
 <script>
 "use strict";
 
-var showGridEl, showActiveEl, showLatEl, autoZoomEl, showPriceLineEl, stickyXAxisEl; // controls including auto-zoom + price line toggle + sticky axis
+var showGridEl, showActiveEl, showLatEl, autoZoomEl, showPriceLineEl; // stickyXAxis auto-detect (control removed)
 
 const PAIR = {{ pair|tojson }};
 const SPLIT_TRIGGER_ENV = {{ split_trigger_env|tojson }};
@@ -1421,6 +1425,8 @@ document.getElementById('pair').textContent = PAIR;
 /* range & spacing from server-side (env), if provided */
 const GRID_MIN = {{ grid_min|tojson }};
 const GRID_MAX = {{ grid_max|tojson }};
+// expose for headless checks and external scripts
+try{ window.GRID_MIN = GRID_MIN; window.GRID_MAX = GRID_MAX; }catch(_){ }
 const GRID_STEP_PCT = {{ grid_step_pct|tojson }};
 
 (function setRangeCard(){
@@ -1976,51 +1982,46 @@ async function updateChart() {
       }
     }
   } else if (mode === 'active') {
-        // Active mode: show active order prices but also include full grid levels
-        // as faint background context. Build union of grid levels + active prices
-        // for the y-axis ticks so both modes present consistent tick sets.
-        const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).filter(p=>isFinite(p)).sort((a, b) => a - b);
+        // Active mode: ONLY render active order horizontal lines and ticks.
+        // Do not show grid-level shapes or ticks for inactive layers.
+        const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).filter(p => isFinite(p)).sort((a, b) => a - b);
         const { below, above } = nearestBracket(activeOrders, currentPrice);
-
-        // Add faint grid-level shapes for context (skip exact boundaries and
-        // skip any level that is an active order to avoid duplicate shapes)
-        try {
-          const allLevels = buildAllLevels();
-          for (const y of allLevels) {
-            if (y === GRID_MIN || y === GRID_MAX) continue;
-            const dup = activeOrders.some(a => Math.abs(a - y) <= (Math.abs(y) * 1e-12 + 1e-12));
-            if (dup) continue;
-            shapes.push(shapeForY(y, 'rgba(200,200,200,0.25)', 1, 'dash'));
-          }
-          // Add active-order shapes and collect their ticks
-          for (const p of activeOrders) {
-            const isNearest = (p === below || p === above);
-            const color = isNearest ? 'rgba(255, 165, 0, 0.9)' : 'rgba(255, 165, 0, 0.4)';
-            const width = isNearest ? 2.5 : 1.5;
-            const dash = isNearest ? 'longdash' : 'dash';
-            shapes.push(shapeForY(p, color, width, dash));
-            yTicksVals.push(p);
-          }
-          // Union grid levels + active prices into tick set
-          const unionSet = new Set([...(buildAllLevels() || []), ...yTicksVals]);
-          yTicksVals = Array.from(unionSet).sort((a, b) => a - b);
-        } catch (e) {
-          // Fallback to showing only active orders if grid build fails
-          for (const p of activeOrders) {
-            shapes.push(shapeForY(p, 'rgba(255, 165, 0, 0.6)', 1.5, 'dash'));
-            yTicksVals.push(p);
-          }
+        // Add shapes for active orders only
+        for (const p of activeOrders) {
+          const isNearest = (p === below || p === above);
+          const color = isNearest ? 'rgba(255, 165, 0, 0.95)' : 'rgba(255, 165, 0, 0.65)';
+          const width = isNearest ? 2.5 : 1.6;
+          const dash = isNearest ? 'longdash' : 'dash';
+          shapes.push(shapeForY(p, color, width, dash));
+          yTicksVals.push(p);
         }
-    } else { // 'grid' mode is the default
-        const allLevels = buildAllLevels();
-        for (const y of allLevels) {
-            if (y === GRID_MIN || y === GRID_MAX) continue;
-            const isBuy = (y <= (currentPrice ?? 0));
-            const color = isBuy ? 'rgba(46, 204, 113, 0.6)' : 'rgba(243, 156, 18, 0.6)';
-            shapes.push(shapeForY(y, color, 1, 'dash'));
-            yTicksVals.push(y);
-        }
+  } else { // 'grid' mode is the default
+    const allLevels = buildAllLevels();
+    // Gather active order prices to highlight them within grid mode
+    const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).filter(p=>isFinite(p)).sort((a,b)=>a-b);
+    const activeSet = new Set(activeOrders.map(a=>Number(a)));
+    const { below: activeBelow, above: activeAbove } = nearestBracket(activeOrders, currentPrice);
+    for (const y of allLevels) {
+      if (y === GRID_MIN || y === GRID_MAX) continue;
+      // If this level corresponds to an active order, emphasize it
+      const isActiveLevel = Array.from(activeSet).some(a => Math.abs(a - y) <= (Math.abs(y) * 1e-12 + 1e-12));
+  if (isActiveLevel) {
+        // nearest active orders are more prominent
+        const isNearestActive = (Math.abs(y - (activeBelow || NaN)) <= (Math.abs(y) * 1e-12 + 1e-12)) || (Math.abs(y - (activeAbove || NaN)) <= (Math.abs(y) * 1e-12 + 1e-12));
+  // activeEmphasis UI removed; use fixed medium emphasis values
+  let alpha = isNearestActive ? 0.95 : 0.65;
+  let width = isNearestActive ? 2.5 : 1.6;
+        const color = `rgba(255, 165, 0, ${alpha.toFixed(3)})`;
+        const dash = isNearestActive ? 'longdash' : 'dash';
+        shapes.push(shapeForY(y, color, width, dash));
+      } else {
+        const isBuy = (y <= (currentPrice ?? 0));
+        const color = isBuy ? 'rgba(46, 204, 113, 0.6)' : 'rgba(243, 156, 18, 0.6)';
+        shapes.push(shapeForY(y, color, 1, 'dash'));
+      }
+      yTicksVals.push(y);
     }
+  }
 
   // Add dynamic current price horizontal reference line (always on top)
   if (isFinite(currentPrice)) {
@@ -2129,6 +2130,34 @@ async function updateChart() {
   // Finalize ticks AFTER adding any gray boundary-extension lines
   yTicksVals = [...new Set(yTicksVals)].sort((a, b) => a - b);
 
+
+  // Compute total extra extension lines (no compact badges: removed by user request)
+  const extraLinesTotal = (extraLinesInfo && ((extraLinesInfo.minLines||0) + (extraLinesInfo.maxLines||0))) || 0;
+
+  // Soft-thinning: reduce visual weight (alpha/width) of extension-line shapes to reduce perceived density
+  function reduceAlpha(col, factor){
+    try{
+      const m = String(col).match(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*([0-9.]+)\)/);
+      if (m){ const r=m[1], g=m[2], b=m[3], a=parseFloat(m[4])*factor; return `rgba(${r}, ${g}, ${b}, ${Math.max(0.03, a).toFixed(3)})`; }
+    }catch(_){ }
+    return col;
+  }
+
+  // Apply thinning to extension shapes (those outside GRID_MIN..GRID_MAX)
+  try{
+    for (let si=0; si<shapes.length; si++){
+      const s = shapes[si];
+      if (!s || !('y0' in s)) continue;
+      const yv = Number(s.y0);
+      if (GRID_MIN != null && GRID_MAX != null && (yv < GRID_MIN - 1e-12 || yv > GRID_MAX + 1e-12)){
+        // reduce width and alpha depending on how many extras we have
+        const factor = extraLinesTotal > 20 ? 0.35 : (extraLinesTotal > 8 ? 0.55 : 0.75);
+        s.line.width = Math.min(1.0, s.line.width || 1.0);
+        s.line.color = reduceAlpha(s.line.color || 'rgba(153,153,153,0.6)', factor);
+      }
+    }
+  }catch(_){ }
+
   // When showing price line, remove other ticks that are too close to avoid overlap
   const priceLineEnabledForCulling = (localStorage.getItem('showPriceLine') !== '0');
   if (priceLineEnabledForCulling && isFinite(currentPrice)) {
@@ -2139,7 +2168,10 @@ async function updateChart() {
 
     if (priceTickVal !== undefined) {
       yTicksVals = yTicksVals.filter(v => {
-        if (v === priceTickVal) return true; // Always keep the price tick itself
+        // Always keep the price tick itself and grid boundaries
+        if (v === priceTickVal) return true;
+        if (GRID_MIN != null && Math.abs(v - GRID_MIN) <= 1e-12) return true;
+        if (GRID_MAX != null && Math.abs(v - GRID_MAX) <= 1e-12) return true;
         return Math.abs(v - priceTickVal) > cullRange; // Remove ticks that are too close
       });
     }
@@ -2148,7 +2180,10 @@ async function updateChart() {
   // General tick culling to prevent overlap for all other ticks
   if (yTicksVals.length > 20) { // Only apply if there are many ticks
     const priceSpan = (GRID_MAX != null && GRID_MIN != null && GRID_MAX > GRID_MIN) ? (GRID_MAX - GRID_MIN) : (currentPrice * 0.02);
-    const minSeparation = priceSpan * 0.012; // Minimum separation of 1.2% of the span
+    // Increase separation when there are many extension lines so the area below/above grid is less dense
+    const extraLinesTotal = (extraLinesInfo && ((extraLinesInfo.minLines||0) + (extraLinesInfo.maxLines||0))) || 0;
+    const sepFactor = extraLinesTotal > 8 ? 0.02 : 0.012;
+    const minSeparation = priceSpan * sepFactor; // Minimum separation factor of the span
 
     const culledTicks = [];
     if (yTicksVals.length > 0) {
@@ -2156,6 +2191,11 @@ async function updateChart() {
       let lastTick = yTicksVals[0];
       for (let i = 1; i < yTicksVals.length - 1; i++) {
         const currentTick = yTicksVals[i];
+        // Keep grid boundaries and price tick preferentially
+        if (GRID_MIN != null && Math.abs(currentTick - GRID_MIN) <= 1e-12) { culledTicks.push(currentTick); lastTick = currentTick; continue; }
+        if (GRID_MAX != null && Math.abs(currentTick - GRID_MAX) <= 1e-12) { culledTicks.push(currentTick); lastTick = currentTick; continue; }
+        const isPriceTick = (isFinite(currentPrice) && Math.abs(currentTick - currentPrice) <= (currentPrice * 1e-9 + 1e-12));
+        if (isPriceTick) { culledTicks.push(currentTick); lastTick = currentTick; continue; }
         if (Math.abs(currentTick - lastTick) > minSeparation) {
           culledTicks.push(currentTick);
           lastTick = currentTick;
@@ -2163,12 +2203,26 @@ async function updateChart() {
       }
       // Always include the last tick, ensuring it's not overlapping the previously added one
       const lastOriginalTick = yTicksVals[yTicksVals.length - 1];
-      if (culledTicks[culledTicks.length - 1] !== lastOriginalTick && Math.abs(lastOriginalTick - culledTicks[culledTicks.length - 1]) > minSeparation) {
-        culledTicks.push(lastOriginalTick);
+      if (culledTicks[culledTicks.length - 1] !== lastOriginalTick) {
+        if (Math.abs(lastOriginalTick - culledTicks[culledTicks.length - 1]) > minSeparation) {
+          culledTicks.push(lastOriginalTick);
+        } else {
+          // If the last tick is too close, but it's a grid boundary, ensure it's present
+          if (GRID_MAX != null && Math.abs(lastOriginalTick - GRID_MAX) <= 1e-12) culledTicks.push(lastOriginalTick);
+        }
       }
     }
     yTicksVals = culledTicks;
   }
+
+  // Always ensure boundaries are present (protect from any earlier culling)
+  try{
+    if (GRID_MIN != null && !yTicksVals.some(v => Math.abs(v - GRID_MIN) <= 1e-12)) yTicksVals.push(GRID_MIN);
+    if (GRID_MAX != null && !yTicksVals.some(v => Math.abs(v - GRID_MAX) <= 1e-12)) yTicksVals.push(GRID_MAX);
+    yTicksVals = [...new Set(yTicksVals)].sort((a,b)=>a-b);
+  }catch(_){ }
+
+  // Compact badges (annotations / DOM badge) were removed per user request.
 
   if (mode === 'active') {
     const activeOrders = OPEN_ORDERS_RAW.map(o => o.price).sort((a, b) => a - b);
@@ -2250,33 +2304,56 @@ async function updateChart() {
     yRange = [low, high];
   }
 
+  // Ensure grid boundaries remain visible even when followPrice/autoZoom set a narrow yRange.
+  // This avoids hiding the purple boundary tick (GRID_MIN/GRID_MAX) when the chart is centered
+  // around the current price or auto-zoomed.
+  if (yRange && GRID_MIN != null) {
+    try {
+      const span = Math.max(1e-9, Math.abs(yRange[1] - yRange[0]));
+      const pad = Math.max(span * 0.02, Math.abs((GRID_MAX || 0) - GRID_MIN) * 0.01, 1e-9);
+      if (GRID_MIN < yRange[0]) yRange[0] = Math.min(yRange[0], GRID_MIN - pad);
+      if (GRID_MAX != null && GRID_MAX > yRange[1]) yRange[1] = Math.max(yRange[1], GRID_MAX + pad);
+    } catch(e) { /* noop */ }
+  }
+
   // Auto-zoom latitude override: when autoZoom (and not followPrice) is active, replace ticks with dynamic bright gray latitudes
   if (autoZoom && !followPrice && yRange) {
     try {
       const span = yRange[1] - yRange[2-1]; // yRange[1]-yRange[0]; keeping original style but correct expression below
     } catch(_){/* noop */}
     const span2 = yRange[1] - yRange[0];
-    if (span2 > 0) {
+      if (span2 > 0) {
       const LAT_COUNT = 10; // number of intervals (produces LAT_COUNT+1 lines)
       const latVals = [];
       for (let i=0;i<=LAT_COUNT;i++) {
         const v = yRange[0] + (span2 * i / LAT_COUNT);
         latVals.push(v);
       }
-      // Build shapes for these dynamic latitudes (avoid duplicating existing shapes at boundaries by skipping if equals GRID_MIN/MAX)
+      // Build faint shapes for these dynamic latitudes (avoid duplicating existing shapes at boundaries)
+      // Use low alpha and put shapes below traces so they don't dominate the chart (Option B: fade + layer:'below')
       for (const v of latVals) {
         if (GRID_MIN != null && Math.abs(v-GRID_MIN) < 1e-12) continue;
         if (GRID_MAX != null && Math.abs(v-GRID_MAX) < 1e-12) continue;
-        shapes.push(shapeForY(v, 'rgba(210,210,210,0.9)', 1, 'solid'));
+        const sh = shapeForY(v, 'rgba(210,210,210,0.12)', 1, 'dot');
+        try{ sh.layer = 'below'; }catch(_){ }
+        // ensure thin line
+        try{ sh.line = sh.line || {}; sh.line.width = 1; sh.line.dash = 'dot'; }catch(_){ }
+        shapes.push(sh);
       }
       // Ensure price tick retained/highlighted
       if (isFinite(currentPrice) && !latVals.some(v=>Math.abs(v-currentPrice) <= (Math.abs(currentPrice)*1e-9 + 1e-12))) {
         latVals.push(currentPrice);
       }
+      // Ensure grid boundaries are present in the tick list so they stay visible
+      try{
+        if (GRID_MIN != null && !latVals.some(v => Math.abs(v - GRID_MIN) <= 1e-12)) latVals.push(GRID_MIN);
+        if (GRID_MAX != null && !latVals.some(v => Math.abs(v - GRID_MAX) <= 1e-12)) latVals.push(GRID_MAX);
+      }catch(_){ }
       latVals.sort((a,b)=>a-b);
-      yTicksVals = latVals;
-      yTicksText = latVals.map(v=>{
-        const isBoundary = (GRID_MIN != null && v === GRID_MIN) || (GRID_MAX != null && v === GRID_MAX);
+      // Deduplicate and assign
+      yTicksVals = [...new Set(latVals.map(v=>Number(v)))].sort((a,b)=>a-b);
+      yTicksText = yTicksVals.map(v=>{
+        const isBoundary = (GRID_MIN != null && Math.abs(v - GRID_MIN) <= 1e-12) || (GRID_MAX != null && Math.abs(v - GRID_MAX) <= 1e-12);
         const isPrice = isFinite(currentPrice) && Math.abs(v-currentPrice) <= (Math.abs(currentPrice)*1e-9 + 1e-12);
         const priceLineEnabled = (localStorage.getItem('showPriceLine') !== '0');
         if (isBoundary) return `<b style="color:#5B21B6">${fmt(v,6)}</b>`;
@@ -2285,6 +2362,9 @@ async function updateChart() {
       });
     }
   }
+
+  // Ensure sticky-mode is applied if chart scroll container is scrollable
+  try{ if (typeof ensureStickyIfScrollable === 'function') ensureStickyIfScrollable(); }catch(_){ }
   // Apply layout updates (shapes and tick arrays). Keep annotations out so
   // only the y-axis tick text is shown for boundary lines (prevents duplicate labels).
   Plotly.relayout('chart', {
@@ -2292,7 +2372,7 @@ async function updateChart() {
     'yaxis.tickmode': 'array',
     'yaxis.tickvals': yTicksVals,
     'yaxis.ticktext': yTicksText,
-    'yaxis.range': yRange,
+    'yaxis.range': yRange
   });
 
   // Removed right-edge price annotation (was previously price-edge-dot)
@@ -2365,22 +2445,20 @@ function setupChartControls() {
     });
   }
   
-  // Sticky X-axis toggle
-  if (stickyXAxisEl) {
-    stickyXAxisEl.checked = (localStorage.getItem('stickyXAxis') === '1');
-    stickyXAxisEl.addEventListener('change', () => {
-      toggleStickyXAxis(stickyXAxisEl.checked);
-      // Force chart resize to apply sticky styles
-      setTimeout(() => {
-        const chartEl = document.getElementById('chart');
-        if (chartEl && window.Plotly) {
-          Plotly.Plots.resize(chartEl);
-        }
-      }, 100);
-    });
-  }
+  // Sticky X-axis control removed — axis will auto-stick when chart container is scrollable.
   const savedMode = localStorage.getItem('chartMode') || 'grid';
   setChartMode(savedMode);
+
+  // Auto-sticky helper: add/remove sticky-mode based on whether the chart container
+  // currently has a vertical scrollbar (content taller than container).
+  function ensureStickyIfScrollable(){
+    try{
+      const wrap = document.getElementById('chartScroll');
+      if (!wrap) return;
+      const isScrollable = wrap.scrollHeight > wrap.clientHeight + 1; // small fudge
+      if (isScrollable) wrap.classList.add('sticky-mode'); else wrap.classList.remove('sticky-mode');
+    }catch(e){ /* noop */ }
+  }
 
   // Legend toggle (DOGE/USDT) - toggles primary price trace visibility (trace 0)
   // legend toggle removed; price curve always visible
@@ -2391,6 +2469,8 @@ window.__currentPrice = null;
 // Control element refs (populated in boot)
 // price marker always visible (legacy toggle removed)
 var followPriceEl = null;
+// New UI controls refs
+// activeEmphasis UI removed; emphasis fixed at 'medium'
 
 function startSSE(){
   try{
@@ -3048,12 +3128,8 @@ function initializeUXImprovements() {
     localStorage.setItem('alwaysShowPriceMarker', '1');
   }
   
-  // 3. Initialize sticky X-axis feature flag (default: false)
-  const stickyXAxis = localStorage.getItem('stickyXAxis') === '1';
-  if (stickyXAxisEl) {
-    stickyXAxisEl.checked = stickyXAxis;
-    toggleStickyXAxis(stickyXAxis);
-  }
+  // 3. Auto-sticky: ensure sticky if chart is scrollable (checkbox removed)
+  try{ if (typeof ensureStickyIfScrollable === 'function') ensureStickyIfScrollable(); }catch(_){ }
 }
 
 function toggleLegendPosition(position) {
@@ -3175,10 +3251,25 @@ async function boot(){
   showActiveEl = document.getElementById('showActiveLayers');
   showLatEl = document.getElementById('showLat');
   showPriceLineEl = document.getElementById('showPriceLine');
-  stickyXAxisEl = document.getElementById('stickyXAxis');
+  // stickyXAxis control removed
   // price marker always visible (legacy toggle removed)
   followPriceEl = document.getElementById('followPrice');
   autoZoomEl = document.getElementById('autoZoom');
+  // activeEmphasis control removed
+
+  // Observe chart scroll container for size/content changes and auto-apply sticky behavior
+  try{
+    const chartWrap = document.getElementById('chartScroll');
+    if (chartWrap) {
+      // initial pass
+      ensureStickyIfScrollable();
+      // listen to scroll/resize and mutations
+      chartWrap.addEventListener('scroll', ensureStickyIfScrollable);
+      window.addEventListener('resize', ensureStickyIfScrollable);
+      const mo = new MutationObserver(ensureStickyIfScrollable);
+      mo.observe(chartWrap, {childList:true, subtree:true, attributes:true});
+    }
+  }catch(_){ }
   
   // Initialize UX improvements with feature flags
   initializeUXImprovements();
