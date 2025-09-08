@@ -520,11 +520,40 @@ def api_order_history():
     allowed_statuses = {"closed","filled","canceled"}
   ENRICH_THRESHOLD = 40
 
+  def _norm_status(s: str) -> str:
+    s = (s or "").lower()
+    if s in ("canceled", "cancelled"):
+      return "canceled"
+    if s in ("filled", "closed", "done"):
+      return "executed"
+    # fallback: treat unknown/other statuses as executed (non-active)
+    return "executed"
+
+  def _normalize_rows(rows: list) -> list:
+    out = []
+    for r in rows:
+      try:
+        nr = dict(r)
+        nr['status'] = _norm_status(nr.get('status'))
+        out.append(nr)
+      except Exception:
+        out.append(r)
+    return out
+
   # Local-only path (no auth or forced)
   if not _auth_available() or FORCE_LOCAL_DATA:
     if local_store:
       rows = local_store.list_history()
-      return {"ok": True, "source": "local", "orders": rows[-max_return:], "total": len(rows)}
+      # normalize statuses to executed/canceled
+      normed = []
+      for r in rows:
+        try:
+          nr = dict(r)
+          nr['status'] = _norm_status(nr.get('status'))
+          normed.append(nr)
+        except Exception:
+          normed.append(r)
+      return {"ok": True, "source": "local", "orders": normed[-max_return:], "total": len(normed)}
     return {"ok": False, "error": "No API key/secret configured", "orders": []}
 
   all_rows: list[dict] = []
@@ -566,6 +595,7 @@ def api_order_history():
           exec_iso = str(exec_ts)
         price = float(o.get("price") or o.get("average") or 0)
         amount = float(o.get("amount") or o.get("filled") or 0)
+        mapped_status = _norm_status(status)
         all_rows.append({
           "id": o.get("id") or o.get("clientOrderId") or o.get("orderId"),
           "time": placement_iso,
@@ -574,7 +604,7 @@ def api_order_history():
           "price": price,
           "amount": amount,
           "value_usdt": price * amount,
-          "status": status,
+          "status": mapped_status,
         })
         if isinstance(placement_ts,(int,float)):
           if oldest_seen is None or placement_ts < oldest_seen:
@@ -612,7 +642,7 @@ def api_order_history():
             "price": price,
             "amount": amount,
             "value_usdt": price * amount,
-            "status": "done",
+            "status": _norm_status("done"),
           }
           key = (row['id'], row['time'], row['side'], row['status'])
           if key in seen:
@@ -645,7 +675,7 @@ def api_order_history():
               'price': price,
               'amount': amt,
               'value_usdt': price * amt,
-              'status': 'done'
+              'status': _norm_status('done')
             }
             key = (row['id'], row['time'], row['side'], row['status'])
             if key in seen:
@@ -662,10 +692,10 @@ def api_order_history():
     if merge_enabled and local_store and hasattr(local_store, 'merge_history'):
       merged = local_store.merge_history(all_rows)
       total = len(merged)
-      resp = {"ok": True, "source": source, "orders": merged[-max_return:], "total": total, "enrich": enrich_sources}
+      resp = {"ok": True, "source": source, "orders": _normalize_rows(merged[-max_return:]), "total": total, "enrich": enrich_sources}
     else:
       total = len(all_rows)
-      resp = {"ok": True, "source": source, "orders": all_rows[-max_return:], "total": total, "enrich": enrich_sources}
+      resp = {"ok": True, "source": source, "orders": _normalize_rows(all_rows[-max_return:]), "total": total, "enrich": enrich_sources}
     if debug_mode:
       resp['debug'] = {
         'raw_total': raw_total,
@@ -700,8 +730,8 @@ def api_order_history():
         })
       if merge_enabled and local_store and hasattr(local_store,'merge_history') and parsed:
         merged = local_store.merge_history(parsed)
-        return {"ok": True, "source": "trades_fallback", "orders": merged[-max_return:], "error": str(e), **details, "total": len(merged)}
-      return {"ok": True, "source": "trades_fallback", "orders": parsed[-max_return:], "error": str(e), **details, "total": len(parsed)}
+        return {"ok": True, "source": "trades_fallback", "orders": _normalize_rows(merged[-max_return:]), "error": str(e), **details, "total": len(merged)}
+      return {"ok": True, "source": "trades_fallback", "orders": _normalize_rows(parsed[-max_return:]), "error": str(e), **details, "total": len(parsed)}
     except Exception as e2:
       details2 = _extract_binance_code(e2)
       if local_store:
@@ -730,8 +760,8 @@ def api_order_history():
           if synth:
             if merge_enabled and local_store and hasattr(local_store,'merge_history'):
               merged = local_store.merge_history(synth)
-              return {"ok": True, "source": "synthetic_state", "orders": merged[-max_return:], "error": str(e2), **details2, "total": len(merged)}
-            return {"ok": True, "source": "synthetic_state", "orders": synth[-max_return:], "error": str(e2), **details2, "total": len(synth)}
+              return {"ok": True, "source": "synthetic_state", "orders": _normalize_rows(merged[-max_return:]), "error": str(e2), **details2, "total": len(merged)}
+            return {"ok": True, "source": "synthetic_state", "orders": _normalize_rows(synth[-max_return:]), "error": str(e2), **details2, "total": len(synth)}
       except Exception:
         pass
   return {"ok": False, "error": str(e2), **details2, "orders": [], "total": 0}
@@ -2303,6 +2333,19 @@ async function updateChart() {
     }
     yRange = [low, high];
   }
+
+  // When autoZoom is active, ensure a slightly larger safe padding around grid boundaries
+  // so the purple GRID_MIN / GRID_MAX lines remain visible and not cramped by other ticks.
+  try{
+    if (autoZoom && yRange && GRID_MIN != null && GRID_MAX != null) {
+      const gridSpan = Math.max(1e-9, GRID_MAX - GRID_MIN);
+      const currentSpan = Math.max(1e-9, Math.abs(yRange[1] - yRange[0]));
+      // Extra padding = max(4% of grid width, 2% of current span)
+      const extraPad = Math.max(gridSpan * 0.04, currentSpan * 0.02);
+      yRange[0] = Math.min(yRange[0], GRID_MIN - extraPad);
+      yRange[1] = Math.max(yRange[1], GRID_MAX + extraPad);
+    }
+  }catch(_){ }
 
   // Ensure grid boundaries remain visible even when followPrice/autoZoom set a narrow yRange.
   // This avoids hiding the purple boundary tick (GRID_MIN/GRID_MAX) when the chart is centered

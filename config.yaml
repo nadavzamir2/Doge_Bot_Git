@@ -10,7 +10,7 @@ grid:
   spacing_pct: 1.0
   window_active_buy_levels: 16
   recenter:
-    enable: true
+    enable: false
     edge_threshold_pct: 90
     dwell_seconds: 600
     center_drift_pct_of_width: 25
