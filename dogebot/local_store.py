@@ -32,10 +32,24 @@ def _write(path: Path, data: Any) -> None:
         pass
 
 def list_open_orders() -> List[Dict[str, Any]]:
-    return _read(OPEN_ORDERS_FILE, [])
+    orders = _read(OPEN_ORDERS_FILE, [])
+    # In PAPER mode, include PAPER orders; otherwise filter them out
+    from config import MODE
+    if MODE == 'PAPER':
+        return orders
+    else:
+        # Remove PAPER mode orders (id starts with 'PAPER-')
+        return [o for o in orders if not str(o.get('id','')).startswith('PAPER-')]
 
 def list_history() -> List[Dict[str, Any]]:
-    return _read(ORDER_HISTORY_FILE, [])
+    hist = _read(ORDER_HISTORY_FILE, [])
+    # In PAPER mode, include PAPER orders; otherwise filter them out
+    from config import MODE
+    if MODE == 'PAPER':
+        return hist
+    else:
+        # Remove PAPER mode orders (id starts with 'PAPER-')
+        return [o for o in hist if not str(o.get('id','')).startswith('PAPER-')]
 
 def add_open_order(order_id: str, side: str, price: float, amount: float) -> None:
     orders = list_open_orders()
@@ -83,12 +97,19 @@ def record_fill(order_id: str, side: str, price: float, amount: float, status: s
 def set_history(rows: list[dict]) -> None:
     """Overwrite history file safely with provided rows (dedup + cap)."""
     try:
-        # Deduplicate by (id,time,side,price,amount,status)
+        # Deduplicate by (id,timestamp,side,price,amount,status)
+        # Prefer execution_time when available to avoid mismatches between trade rows
+        def _time_key(item):
+            et = item.get('execution_time')
+            if et and et != '—':
+                return et
+            return item.get('time')
+
         seen = set()
         cleaned = []
         for r in rows:
             key = (
-                r.get('id'), r.get('time'), r.get('side'),
+                r.get('id'), _time_key(r), r.get('side'),
                 round(float(r.get('price',0.0)), 10),
                 round(float(r.get('amount',0.0)), 10),
                 r.get('status'),
@@ -104,26 +125,53 @@ def set_history(rows: list[dict]) -> None:
 def merge_history(new_rows: list[dict]) -> list[dict]:
     """Merge new rows into existing history, persist, and return merged list."""
     existing = list_history()
-    # Build key set for fast dedup
-    keys = {
+    # Build key set for fast dedup; prefer execution_time when present
+    def _time_key(item):
+        et = item.get('execution_time')
+        if et and et != '—':
+            return et
+        return item.get('time')
+
+    # Enhanced deduplication: detect duplicates by trade characteristics
+    # Primary key: trade characteristics (detects same trade from different sources)
+    trade_keys = {
         (
-            r.get('id'), r.get('time'), r.get('side'),
+            _time_key(r), r.get('side'),
+            round(float(r.get('price',0.0)),10),
+            round(float(r.get('amount',0.0)),10)
+        ) for r in existing
+    }
+    
+    # Secondary key: exact record (for true duplicates)
+    exact_keys = {
+        (
+            r.get('id'), _time_key(r), r.get('side'),
             round(float(r.get('price',0.0)),10),
             round(float(r.get('amount',0.0)),10),
             r.get('status')
         ) for r in existing
     }
+    
     added = 0
     for r in new_rows:
-        k = (
-            r.get('id'), r.get('time'), r.get('side'),
+        trade_key = (
+            _time_key(r), r.get('side'),
+            round(float(r.get('price',0.0)),10),
+            round(float(r.get('amount',0.0)),10)
+        )
+        exact_key = (
+            r.get('id'), _time_key(r), r.get('side'),
             round(float(r.get('price',0.0)),10),
             round(float(r.get('amount',0.0)),10),
             r.get('status')
         )
-        if k not in keys:
+        
+        # Skip if this trade already exists (same execution_time + price + amount + side)
+        # or if it's an exact duplicate record
+        if trade_key not in trade_keys and exact_key not in exact_keys:
             existing.append(r)
-            keys.add(k)
+            trade_keys.add(trade_key)
+            exact_keys.add(exact_key)
             added += 1
     if added:
         set_history(existing)

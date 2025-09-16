@@ -1,1 +1,13 @@
-{"cumulative_profit_usd": 12.34, "total_profit_usd": 12.34, "splits_count": 5, "sell_trades_count": 5, "actual_splits_count": 4, "bnb_converted_usd": 1.11, "realized_profit_usd": 10.0, "unrealized_profit_usd": 2.0, "grid_profit_usd": 8.0, "fees_usd": 0.66, "profit_pct": 3.21, "split_trigger_usd": 4.0}
+{
+  "realized_profit_usd": 1.51186,
+  "cumulative_profit_usd": 1.51186,
+  "grid_profit_usd": 1.51186,
+  "total_profit_usd": 1.51186,
+  "unrealized_profit_usd": 0.0,
+  "fees_usd": 0.0,
+  "sell_trades_count": 18,
+  "splits_count": 18,
+  "open_orders_count": 0,
+  "profit_pct": 3.7796499999999997,
+  "last_update_ts": 1758044740.401748
+}

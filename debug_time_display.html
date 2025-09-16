@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debug Time Display</title>
+</head>
+<body>
+    <h2>Debug Time Display</h2>
+    <div id="output"></div>
+
+    <script>
+        function pad2(n){ return String(n).padStart(2,'0'); }
+
+        function fmtDateTimeLocal(s){
+          console.log('Input to fmtDateTimeLocal:', s, 'Type:', typeof s);
+          if (!s) {
+            console.log('Empty/null input, returning —');
+            return '—';
+          }
+          const d = new Date(s);
+          console.log('Date object:', d, 'Valid:', !isNaN(d.getTime()));
+          if (isNaN(d.getTime())) return '—';
+          const day = pad2(d.getDate());
+          const mon = pad2(d.getMonth()+1);
+          const yr  = d.getFullYear();
+          const hh  = pad2(d.getHours());
+          const mm  = pad2(d.getMinutes());
+          const ss  = pad2(d.getSeconds());
+          return `${day}/${mon}/${yr} ${hh}:${mm}:${ss}`;
+        }
+
+        // Test different time formats
+        const testCases = [
+            "2025-08-19T19:52:32.835000Z",
+            "1756049461604",
+            "2025-09-16T01:36:00Z",
+            null,
+            undefined,
+            "",
+            "invalid-date"
+        ];
+
+        let output = document.getElementById('output');
+        output.innerHTML = '<h3>Test Results:</h3>';
+        
+        testCases.forEach((testCase, index) => {
+            console.log(`\n--- Test ${index + 1} ---`);
+            const result = fmtDateTimeLocal(testCase);
+            output.innerHTML += `<p>Test ${index + 1}: Input="${testCase}" → Result="${result}"</p>`;
+        });
+
+        // Test a sample order object like from the API
+        const sampleOrder = {
+            "id": "11585723784",
+            "time": "2025-08-19T19:52:32.835000Z",
+            "execution_time": "1756049461604",
+            "side": "buy",
+            "price": 0.18233,
+            "amount": 27.0,
+            "value_usdt": 4.92291,
+            "status": "canceled"
+        };
+
+        console.log('\n--- Sample Order Test ---');
+        output.innerHTML += '<h3>Sample Order Test:</h3>';
+        output.innerHTML += `<p>Time: ${fmtDateTimeLocal(sampleOrder.time)}</p>`;
+        output.innerHTML += `<p>Execution Time: ${fmtDateTimeLocal(sampleOrder.execution_time)}</p>`;
+        output.innerHTML += `<p>Fallback (execution_time || time): ${fmtDateTimeLocal(sampleOrder.execution_time || sampleOrder.time)}</p>`;
+    </script>
+</body>
+</html>

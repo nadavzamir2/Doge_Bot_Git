@@ -25,7 +25,7 @@ from config import (
   API_KEY, API_SECRET, BASE_ORDER_USD, DATA_DIR, GRID_MAX, GRID_MIN, GRID_STEP_PCT,
   HISTORY_FILE_PATH as HISTORY_FILE, MAX_USD_FOR_CYCLE, PROFIT_SPLIT_TRIGGER_USD,
   RECV_WINDOW, REGION as BINANCE_REGION, SPLIT_CHUNK_USD, STATS_FILE_PATH as STATS_FILE,
-  TRADING_PAIR as PAIR, STATE_FILE_PATH, FORCE_LOCAL_DATA, MODE
+  TRADING_PAIR as PAIR, STATE_FILE_PATH, FORCE_LOCAL_DATA
 )
 try:
   from dogebot import local_store
@@ -455,8 +455,7 @@ def _extract_binance_code(exc: Exception) -> dict:
 
 @app.get("/api/open_orders")
 def api_open_orders():
-  # In PAPER mode, always use local store regardless of auth
-  if MODE == 'PAPER' or not _auth_available():
+  if not _auth_available():
     if local_store:
       return {"ok": True, "source": "local", "orders": local_store.list_open_orders()}
     return {"ok": False, "error": "No API key/secret configured", "orders": []}
@@ -634,11 +633,9 @@ def api_order_history():
           with open(STATE_FILE_PATH,'r',encoding='utf-8') as f:
             st = json.load(f)
           sell_fills = (st or {}).get('sell_fills', {})
-          seen_ids = { r.get('id') for r in all_rows }  # Just check by ID to avoid duplicates
+          seen = { (r.get('id'), r.get('time'), r.get('side'), r.get('status')) for r in all_rows }
           added = 0
           for sid, info in sell_fills.items():
-            if sid in seen_ids:  # Skip if we already have this order ID
-              continue
             price = float(info.get('price',0.0))
             amt = float(info.get('amount',0.0))
             row = {
@@ -651,21 +648,16 @@ def api_order_history():
               'value_usdt': price * amt,
               'status': 'done'
             }
+            key = (row['id'], row['time'], row['side'], row['status'])
+            if key in seen:
+              continue
             all_rows.append(row)
-            seen_ids.add(sid)
+            seen.add(key)
             added += 1
           if added:
             enrich_sources.append(f"state(+{added})")
       except Exception:
         pass
-
-    # Normalize times: if placement time is missing, use execution_time for display consistency
-    for r in all_rows:
-      t = r.get('time')
-      et = r.get('execution_time')
-      if (t is None) or (t == '') or (t == '—'):
-        if et and et != '—':
-          r['time'] = et
 
     source = "live"
     if merge_enabled and local_store and hasattr(local_store, 'merge_history'):
@@ -971,51 +963,6 @@ HTML = r"""<!doctype html>
     z-index: 10;
   }
   
-  /* Improved scrollbar styling for chart container */
-  .chart-container {
-    scrollbar-width: thin;
-    scrollbar-color: #888 #f1f1f1;
-  }
-  
-  .chart-container::-webkit-scrollbar {
-    width: 8px;
-  }
-  
-  .chart-container::-webkit-scrollbar-track {
-    background: #f1f1f1;
-    border-radius: 4px;
-  }
-  
-  .chart-container::-webkit-scrollbar-thumb {
-    background: #888;
-    border-radius: 4px;
-  }
-  
-  .chart-container::-webkit-scrollbar-thumb:hover {
-    background: #555;
-  }
-  
-  /* Visual indicator for scrollable content */
-  .chart-container::before {
-    content: "↕ Scroll to see all price levels";
-    position: absolute;
-    top: 10px;
-    right: 20px;
-    background: rgba(0,0,0,0.7);
-    color: white;
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    z-index: 100;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 0.3s ease;
-  }
-  
-  .chart-container:hover::before {
-    opacity: 1;
-  }
-  
   @keyframes spin {
     to { transform: rotate(360deg); }
   }
@@ -1035,7 +982,7 @@ HTML = r"""<!doctype html>
   .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; }
   .pill.buy { background:#e6fffa; color:#2c7a7b; }
   .pill.sell { background:#fff5f5; color:#c53030; }
-  #chart { width:100%; height:720px; min-height:720px; }
+  #chart { width:100%; height:420px; }
 
   .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
   .controls label { font-size:12px; color:var(--muted); }
@@ -1189,8 +1136,8 @@ HTML = r"""<!doctype html>
             </label>
             <!-- legend toggle removed (always show price curve) -->
           </div>
-          <div id="chartScroll" class="chart-container" style="max-height:720px; overflow-y:auto; border:1px solid #eee; border-radius:4px;">
-            <div id="chart" style="height:720px;"></div>
+          <div id="chartScroll" class="chart-container" style="max-height:520px; overflow-y:auto; border:1px solid #eee; border-radius:4px;">
+            <div id="chart" style="height:520px;"></div>
           </div>
         </div>
       </details>
@@ -1244,7 +1191,6 @@ HTML = r"""<!doctype html>
             <label>Sort by
               <select id="histSortBy">
                 <option value="time">Time</option>
-                <option value="execution_time" selected>Execution Time</option>
                 <option value="side">Side</option>
                 <option value="status">Status</option>
                 <option value="price">Price</option>
@@ -1254,16 +1200,37 @@ HTML = r"""<!doctype html>
             </label>
             <label>Direction
               <select id="histSortDir">
-                <option value="desc" selected>Desc</option>
+                <option value="desc">Desc</option>
                 <option value="asc">Asc</option>
               </select>
             </label>
             <label>Filter
               <input id="histFilter" type="text" placeholder="e.g. buy / sell / filled" />
             </label>
-            <button id="btnHistOlder" title="Fetch older history (paginate backwards)">⬇ Older</button>
-            <span id="histOlderSpinner" class="spinner" style="display:none">⏳</span>
           </div>
+
+          <div class="table-controls">
+              <select id="histSortBy">
+                <option value="time">Time</option>
+                <option value="side">Side</option>
+                <option value="status">Status</option>
+                <option value="price">Price</option>
+                <option value="amount">Amount</option>
+                <option value="value_usdt">Value</option>
+              </select>
+            </label>
+            <label>Direction
+              <select id="histSortDir">
+                <option value="desc">Desc</option>
+                <option value="asc">Asc</option>
+              </select>
+            </label>
+            <label>Filter
+              <input id="histFilter" placeholder="filter..." />
+            </label>
+             <button id="btnHistOlder" title="Fetch older history (paginate backwards)">⬇ Older</button>
+            <span id="histOlderSpinner" class="spinner" style="display:none">⏳</span>
+            </div>
 
           <table id="histTbl">
             <thead><tr>
@@ -1350,23 +1317,7 @@ function fmt0(n){ return (n==null)?'—':String(n); }
 
 /* date/time: dd/mm/yyyy HH:MM:SS (24h) */
 function fmtDateTimeLocal(s){
-  if (!s) return '—';
-  
-  let d;
-  // Handle timestamp numbers (like 1756049461604) vs ISO strings
-  if (typeof s === 'string' && /^\d+$/.test(s) && s.length > 10) {
-    // Looks like a timestamp in milliseconds
-    d = new Date(parseInt(s));
-  } else if (typeof s === 'number' || (typeof s === 'string' && /^\d+$/.test(s))) {
-    // Numeric timestamp (could be seconds or milliseconds)
-    const num = typeof s === 'number' ? s : parseInt(s);
-    // If it's a large number, treat as milliseconds; otherwise seconds
-    d = new Date(num > 1000000000000 ? num : num * 1000);
-  } else {
-    // ISO string or other format
-    d = new Date(s);
-  }
-  
+  const d = new Date(s);
   if (isNaN(d.getTime())) return '—';
   const day = pad2(d.getDate());
   const mon = pad2(d.getMonth()+1);
@@ -1880,8 +1831,6 @@ async function updateChart() {
         }
     } else { // 'grid' mode is the default
         const allLevels = buildAllLevels();
-        
-        // Show ALL levels - no culling, chart height will be adjusted in the layout update
         for (const y of allLevels) {
             if (y === GRID_MIN || y === GRID_MAX) continue;
             const isBuy = (y <= (currentPrice ?? 0));
@@ -2014,21 +1963,10 @@ async function updateChart() {
     }
   }
 
-  // General tick culling to prevent overlap - but NOT for grid mode (user wants all levels)
-  if (mode !== 'grid' && yTicksVals.length > 12) { // Apply more aggressively when there are many ticks
+  // General tick culling to prevent overlap for all other ticks
+  if (yTicksVals.length > 20) { // Only apply if there are many ticks
     const priceSpan = (GRID_MAX != null && GRID_MIN != null && GRID_MAX > GRID_MIN) ? (GRID_MAX - GRID_MIN) : (currentPrice * 0.02);
-    
-    // Calculate minimum separation based on both price span and visual space
-    // Assume roughly 720px chart height, want minimum 25px between ticks
-    const chartHeight = 720;
-    const minPixelSpacing = 25;
-    const ticksFromPixels = Math.floor(chartHeight / minPixelSpacing);
-    const maxDesiredTicks = Math.min(ticksFromPixels, 20); // Cap at 20 ticks maximum
-    
-    // Dynamic separation: ensure we don't exceed desired tick count
-    const baseSeparation = priceSpan * 0.025; // 2.5% base
-    const dynamicSeparation = priceSpan / maxDesiredTicks;
-    const minSeparation = Math.max(baseSeparation, dynamicSeparation);
+    const minSeparation = priceSpan * 0.012; // Minimum separation of 1.2% of the span
 
     const culledTicks = [];
     if (yTicksVals.length > 0) {
@@ -2167,21 +2105,12 @@ async function updateChart() {
   }
   // Apply layout updates (shapes and tick arrays). Keep annotations out so
   // only the y-axis tick text is shown for boundary lines (prevents duplicate labels).
-  
-  // Calculate dynamic height for grid mode to show all levels with proper spacing
-  let chartHeight = 520; // Default height
-  if (mode === 'grid' && yTicksVals.length > 0) {
-    const minSpacingPx = 25; // Minimum 25px between each level
-    chartHeight = Math.max(720, yTicksVals.length * minSpacingPx + 100); // +100 for padding
-  }
-  
   Plotly.relayout('chart', {
     shapes: shapes,
     'yaxis.tickmode': 'array',
     'yaxis.tickvals': yTicksVals,
     'yaxis.ticktext': yTicksText,
     'yaxis.range': yRange,
-    height: chartHeight,
   });
 
   // Removed right-edge price annotation (was previously price-edge-dot)
@@ -2467,26 +2396,6 @@ window.__gridLevels = [];
 window.__lower_bound = null;
 window.__upper_bound = null;
 
-function normalizeOrderStatus(status) {
-  if (!status) return '—';
-  const statusLower = String(status).toLowerCase();
-  
-  // Map all execution-related statuses to "executed"
-  const executedStatuses = ['executed', 'filled', 'closed', 'done'];
-  if (executedStatuses.includes(statusLower)) {
-    return 'executed';
-  }
-  
-  // Map all cancellation-related statuses to "canceled"
-  const canceledStatuses = ['canceled', 'cancelled'];
-  if (canceledStatuses.includes(statusLower)) {
-    return 'canceled';
-  }
-  
-  // For any unknown status, default to original
-  return status;
-}
-
 function sortBy(arr, key, dir){
   const m = dir === 'asc' ? 1 : -1;
   return [...arr].sort((a,b)=>{
@@ -2502,17 +2411,14 @@ function sortBy(arr, key, dir){
 function textFilter(arr, text){
   if (!text) return arr;
   const q = text.toLowerCase();
-  return arr.filter(o => {
-    const normalizedStatus = normalizeOrderStatus(o.status);
-    return (
-      (o.time||'').toLowerCase().includes(q) ||
-      (o.side||'').toLowerCase().includes(q) ||
-      String(o.price).toLowerCase().includes(q) ||
-      String(o.amount).toLowerCase().includes(q) ||
-      String(o.value_usdt).toLowerCase().includes(q) ||
-      (normalizedStatus? String(normalizedStatus).toLowerCase().includes(q): false)
-    );
-  });
+  return arr.filter(o =>
+    (o.time||'').toLowerCase().includes(q) ||
+    (o.side||'').toLowerCase().includes(q) ||
+    String(o.price).toLowerCase().includes(q) ||
+    String(o.amount).toLowerCase().includes(q) ||
+    String(o.value_usdt).toLowerCase().includes(q) ||
+    (o.status? String(o.status).toLowerCase().includes(q): false)
+  );
 }
 
 function renderOpenOrders(){
@@ -2613,25 +2519,13 @@ async function loadOpenOrders(){
 }
 
 function renderHistOrders(meta){
-  const tb = document.querySelector('#histTbl tbody'); 
-  if (!tb) return;
-  tb.innerHTML='';
-  
-  if (!HIST_ORDERS_RAW || !Array.isArray(HIST_ORDERS_RAW)) {
-    return;
-  }
-  
-  const sortKey = document.getElementById('histSortBy')?.value || 'execution_time';
-  const sortDir = document.getElementById('histSortDir')?.value || 'desc';
-  const q = document.getElementById('histFilter')?.value?.trim() || '';
+  const tb = document.querySelector('#histTbl tbody'); tb.innerHTML='';
+  const sortKey = document.getElementById('histSortBy').value;
+  const sortDir = document.getElementById('histSortDir').value;
+  const q = document.getElementById('histFilter').value.trim();
 
-  let rows = HIST_ORDERS_RAW;
-  try {
-    rows = textFilter(HIST_ORDERS_RAW, q);
-    rows = sortBy(rows, sortKey, sortDir);
-  } catch(e) {
-    rows = HIST_ORDERS_RAW;
-  }
+  let rows = textFilter(HIST_ORDERS_RAW, q);
+  rows = sortBy(rows, sortKey, sortDir);
 
   const cntEl = document.getElementById('histCount');
   if (cntEl){
@@ -2644,16 +2538,11 @@ function renderHistOrders(meta){
 
   for(const o of rows){
     const tr = document.createElement('tr');
-    const normalizedStatus = normalizeOrderStatus(o.status);
-    // Prefer real timestamps; treat the '—' sentinel as missing.
-    const timePrimary = (o.time && o.time !== '—') ? o.time : ((o.execution_time && o.execution_time !== '—') ? o.execution_time : o.time);
-    const timeExec    = (o.execution_time && o.execution_time !== '—') ? o.execution_time : ((o.time && o.time !== '—') ? o.time : o.execution_time);
-    
     tr.innerHTML = `
-      <td>${fmtDateTimeLocal(timePrimary)}</td>
-      <td>${fmtDateTimeLocal(timeExec)}</td>
+      <td>${fmtDateTimeLocal(o.time)}</td>
+      <td>${fmtDateTimeLocal(o.execution_time || o.time)}</td>
       <td><span class="pill ${o.side==='buy'?'buy':'sell'}">${o.side ?? '—'}</span></td>
-      <td>${normalizedStatus}</td>
+      <td>${o.status ?? '—'}</td>
       <td class="mono">${fmt(o.price, 6)}</td>
       <td class="mono">${fmt(o.amount, 2)}</td>
       <td class="mono">${fmt2(o.value_usdt)}</td>`;

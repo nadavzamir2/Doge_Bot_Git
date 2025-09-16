@@ -659,14 +659,6 @@ def api_order_history():
       except Exception:
         pass
 
-    # Normalize times: if placement time is missing, use execution_time for display consistency
-    for r in all_rows:
-      t = r.get('time')
-      et = r.get('execution_time')
-      if (t is None) or (t == '') or (t == '—'):
-        if et and et != '—':
-          r['time'] = et
-
     source = "live"
     if merge_enabled and local_store and hasattr(local_store, 'merge_history'):
       merged = local_store.merge_history(all_rows)
@@ -2645,13 +2637,10 @@ function renderHistOrders(meta){
   for(const o of rows){
     const tr = document.createElement('tr');
     const normalizedStatus = normalizeOrderStatus(o.status);
-    // Prefer real timestamps; treat the '—' sentinel as missing.
-    const timePrimary = (o.time && o.time !== '—') ? o.time : ((o.execution_time && o.execution_time !== '—') ? o.execution_time : o.time);
-    const timeExec    = (o.execution_time && o.execution_time !== '—') ? o.execution_time : ((o.time && o.time !== '—') ? o.time : o.execution_time);
     
     tr.innerHTML = `
-      <td>${fmtDateTimeLocal(timePrimary)}</td>
-      <td>${fmtDateTimeLocal(timeExec)}</td>
+      <td>${fmtDateTimeLocal(o.time)}</td>
+      <td>${fmtDateTimeLocal(o.execution_time || o.time)}</td>
       <td><span class="pill ${o.side==='buy'?'buy':'sell'}">${o.side ?? '—'}</span></td>
       <td>${normalizedStatus}</td>
       <td class="mono">${fmt(o.price, 6)}</td>
